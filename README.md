@@ -8,13 +8,14 @@ back out on both transports.
 Image delivery is real-time first: frames are dropped and quality is degraded automatically
 rather than allowing the view to fall behind.
 
-## Run
+## Install
 
 ```sh
-nix run github:jeff-hykin/temp_web_controller
-# or
-cargo run --release
+nix profile install github:jeff-hykin/temp_web_controller
 ```
+
+That puts `web_ctrl` on your PATH. To run it once without installing, use
+`nix run github:jeff-hykin/temp_web_controller` instead.
 
 Then open the URL it prints (`http://<lan ip>:8099`) from a phone or laptop on the same network.
 
@@ -37,10 +38,24 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
 - `W`/`A`/`S`/`D` or arrow keys to drive, `Q`/`E` to strafe, space to stop
 - drag the on-screen stick on touch devices
 - tap a camera chip to open or close that stream
-- the settings drawer adjusts speeds, publish rate, deadman timeout, and image quality
+- the settings drawer adjusts speeds, deadman timeout, and image quality
 
 Commands expire after the deadman timeout (400 ms default), so a dropped connection stops the
 robot rather than latching the last command.
+
+## Transform tree
+
+`tf2_msgs.TFMessage` is decoded off both transports and drawn as a graph under
+Settings → Transform tree. A red dot appears on the Settings button whenever
+something is wrong:
+
+- a frame with two parents
+- a disjoint forest (more than one root)
+- a cycle
+- an edge that stopped arriving, which `/tf_static` is exempt from since it publishes rarely
+
+It refreshes every two seconds, which is deliberate — tf is a diagnostic here,
+not part of the video path.
 
 ## Develop
 

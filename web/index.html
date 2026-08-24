@@ -103,15 +103,28 @@
         </div>
 
         <div class="group">
-            <p class="group-title">Transform tree</p>
-            <div id="tf-warnings" class="warnings" hidden></div>
-            <div id="tf-tree" class="tf-tree"></div>
+            <p class="group-title">Diagnostics</p>
+            <button id="tf-open" class="row link">
+                <span>Transform tree</span>
+                <em id="tf-summary">no tf seen yet</em>
+            </button>
         </div>
 
         <div class="group">
             <p class="group-title">Live topics</p>
             <div id="topic-table" class="topics"></div>
         </div>
+    </aside>
+
+    <div id="tf-scrim" class="scrim" hidden></div>
+    <aside id="tf-panel" class="panel" hidden aria-label="Transform tree">
+        <div class="settings-head">
+            <h2>Transform tree</h2>
+            <button id="tf-close" class="ghost">Done</button>
+        </div>
+        <div id="tf-warnings" class="warnings" hidden></div>
+        <div id="tf-graph" class="tf-graph"></div>
+        <p class="hint-text">Solid arrows are live. Dashed red means the transform stopped arriving; a red frame has two parents or sits in a cycle.</p>
     </aside>
 
     <script src="/app.js"></script>

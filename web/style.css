@@ -499,26 +499,136 @@ input[type="range"] {
     color: #ff8a80;
 }
 
-.tf-tree {
-    padding: 10px 14px;
-    border-top: 1px solid var(--hairline);
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    white-space: pre;
-    overflow-x: auto;
-    color: var(--muted);
+.row.link {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    background: none;
+    font: inherit;
+    font-size: 14px;
+    text-align: left;
+    cursor: pointer;
 }
 
-.tf-tree .frame {
-    color: var(--text);
-}
-
-.tf-tree .tag {
+.row.link::after {
+    content: "\203a";
     color: var(--faint);
+    font-size: 18px;
+    line-height: 1;
 }
 
-.tf-tree .stale .frame {
+.row.link em {
+    margin-left: auto;
+    color: var(--faint);
+    font-style: normal;
+    font-size: 12px;
+}
+
+.row.link em.bad {
     color: var(--bad);
+}
+
+/* Sits above the settings drawer, which is what opened it. */
+#tf-scrim {
+    z-index: 10;
+}
+
+.panel {
+    position: fixed;
+    inset: 0;
+    margin: auto;
+    width: min(920px, calc(100% - 24px));
+    height: min(660px, calc(100% - 24px));
+    background: rgba(28, 28, 30, 0.94);
+    backdrop-filter: saturate(180%) blur(28px);
+    border: 1px solid var(--hairline);
+    border-radius: 20px;
+    padding: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    z-index: 11;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6);
+    animation: pop-in 0.24s cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+@keyframes pop-in {
+    from { transform: scale(0.96); opacity: 0; }
+}
+
+.tf-graph {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    border-radius: 14px;
+    background: var(--surface);
+    display: grid;
+    place-items: center;
+}
+
+.tf-graph .empty-graph {
+    color: var(--faint);
+    font-size: 13px;
+}
+
+.tf-graph svg {
+    display: block;
+}
+
+.tf-graph .node rect {
+    fill: rgba(255, 255, 255, 0.09);
+    stroke: var(--hairline);
+    rx: 8;
+}
+
+.tf-graph .node text {
+    fill: var(--text);
+    font-size: 12px;
+    font-weight: 500;
+    text-anchor: middle;
+    dominant-baseline: middle;
+}
+
+.tf-graph .node.root rect {
+    fill: rgba(10, 132, 255, 0.22);
+    stroke: rgba(10, 132, 255, 0.7);
+}
+
+.tf-graph .node.bad rect {
+    fill: rgba(255, 69, 58, 0.2);
+    stroke: var(--bad);
+}
+
+.tf-graph .edge {
+    fill: none;
+    stroke: rgba(235, 235, 245, 0.45);
+    stroke-width: 1.5;
+}
+
+.tf-graph .edge.bad {
+    stroke: var(--bad);
+    stroke-width: 2;
+}
+
+.tf-graph .edge.stale {
+    stroke: var(--bad);
+    stroke-dasharray: 5 4;
+}
+
+.tf-graph .edge-label {
+    fill: var(--faint);
+    font-size: 10px;
+    text-anchor: middle;
+    paint-order: stroke;
+    stroke: #1c1c1e;
+    stroke-width: 4px;
+    stroke-linejoin: round;
+}
+
+.tf-graph .edge-label.bad {
+    fill: var(--bad);
 }
 
 @media (max-width: 700px) {

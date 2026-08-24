@@ -120,6 +120,184 @@ function renderTileStats(streams) {
     }
 }
 
+const NODE_HEIGHT = 30
+const ROW_GAP = 74
+const NODE_GAP = 22
+const GRAPH_MARGIN = 22
+
+const svgElement = (name, attributes) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", name)
+    for (const [key, value] of Object.entries(attributes)) {
+        node.setAttribute(key, value)
+    }
+    return node
+}
+
+/// Places every frame on the row below its parent, then draws the edges. Frames
+/// only reachable through a cycle get their own rows below everything else.
+function layoutTf(view) {
+    const childrenOf = new Map()
+    const parentsOf = new Map()
+    const frames = new Set()
+    for (const link of view.links) {
+        childrenOf.set(link.parent, [...(childrenOf.get(link.parent) ?? []), link])
+        parentsOf.set(link.child, [...(parentsOf.get(link.child) ?? []), link])
+        frames.add(link.parent)
+        frames.add(link.child)
+    }
+
+    // Longest path from a root, so a frame always sits strictly below every one
+    // of its parents. The round cap is what stops a cycle from running away.
+    const depths = new Map([...frames].map((frame) => [frame, 0]))
+    for (let round = 0; round < frames.size; round++) {
+        let changed = false
+        for (const link of view.links) {
+            if (depths.get(link.child) < depths.get(link.parent) + 1) {
+                depths.set(link.child, depths.get(link.parent) + 1)
+                changed = true
+            }
+        }
+        if (!changed) {
+            break
+        }
+    }
+    const used = [...new Set(depths.values())].sort((left, right) => left - right)
+    for (const [frame, level] of depths) {
+        depths.set(frame, used.indexOf(level))
+    }
+
+    const rows = new Map()
+    for (const [frame, level] of depths) {
+        rows.set(level, [...(rows.get(level) ?? []), frame])
+    }
+
+    const placed = new Map()
+    let widest = 0
+    const levels = [...rows.keys()].sort((left, right) => left - right)
+    for (const level of levels) {
+        const anchor = (frame) => {
+            const centers = (parentsOf.get(frame) ?? [])
+                .map((link) => placed.get(link.parent))
+                .filter(Boolean)
+                .map((box) => box.x + box.width / 2)
+            return centers.length ? centers.reduce((sum, value) => sum + value, 0) / centers.length : 0
+        }
+        const row = rows.get(level).sort((left, right) => anchor(left) - anchor(right) || left.localeCompare(right))
+        let offset = 0
+        for (const frame of row) {
+            const width = Math.max(66, frame.length * 7.2 + 22)
+            placed.set(frame, { x: offset, y: level * ROW_GAP, width })
+            offset += width + NODE_GAP
+        }
+        widest = Math.max(widest, offset - NODE_GAP)
+    }
+    for (const level of levels) {
+        const row = rows.get(level)
+        const last = placed.get(row[row.length - 1])
+        const shift = (widest - (last.x + last.width)) / 2
+        for (const frame of row) {
+            placed.get(frame).x += shift
+        }
+    }
+
+    const orphans = new Set([...frames].filter((frame) => !isReachable(frame, view.roots, parentsOf)))
+    return { placed, parentsOf, orphans, width: widest, height: levels.length * ROW_GAP - ROW_GAP + NODE_HEIGHT }
+}
+
+function isReachable(frame, roots, parentsOf) {
+    const seen = new Set()
+    const queue = [frame]
+    while (queue.length) {
+        const current = queue.pop()
+        if (roots.includes(current)) {
+            return true
+        }
+        if (!seen.add(current)) {
+            continue
+        }
+        queue.push(...(parentsOf.get(current) ?? []).map((link) => link.parent))
+    }
+    return false
+}
+
+function renderTfGraph(view) {
+    const container = element("tf-graph")
+    if (view.links.length === 0) {
+        const empty = document.createElement("p")
+        empty.className = "empty-graph"
+        empty.textContent = "no tf seen yet"
+        container.replaceChildren(empty)
+        return
+    }
+
+    const { placed, parentsOf, orphans, width, height } = layoutTf(view)
+    const svg = svgElement("svg", {
+        width: width + GRAPH_MARGIN * 2,
+        height: height + GRAPH_MARGIN * 2,
+        viewBox: `${-GRAPH_MARGIN} ${-GRAPH_MARGIN} ${width + GRAPH_MARGIN * 2} ${height + GRAPH_MARGIN * 2}`,
+    })
+
+    for (const link of view.links) {
+        const from = placed.get(link.parent)
+        const to = placed.get(link.child)
+        const doubleParent = (parentsOf.get(link.child) ?? []).length > 1
+        const startX = from.x + from.width / 2
+        const startY = from.y + NODE_HEIGHT
+        const endX = to.x + to.width / 2
+        const endY = to.y
+        const bend = Math.max(18, Math.abs(endY - startY) / 2)
+        let className = "edge"
+        if (link.stale) {
+            className += " stale"
+        } else if (doubleParent) {
+            className += " bad"
+        }
+        svg.append(svgElement("path", {
+            class: className,
+            d: `M ${startX} ${startY} C ${startX} ${startY + bend}, ${endX} ${endY - bend}, ${endX} ${endY}`,
+            "marker-end": "url(#tf-arrow)",
+        }))
+        if (link.stale || link.is_static) {
+            const label = svgElement("text", {
+                class: link.stale ? "edge-label bad" : "edge-label",
+                x: (startX + endX) / 2,
+                y: (startY + endY) / 2 + 4,
+            })
+            label.textContent = link.stale ? `${link.seconds_since_seen.toFixed(0)}s ago` : "static"
+            svg.append(label)
+        }
+    }
+
+    for (const [frame, box] of placed) {
+        const broken = orphans.has(frame) || (parentsOf.get(frame) ?? []).length > 1
+        const group = svgElement("g", {
+            class: `node${broken ? " bad" : view.roots.includes(frame) ? " root" : ""}`,
+        })
+        group.append(svgElement("rect", { x: box.x, y: box.y, width: box.width, height: NODE_HEIGHT }))
+        const label = svgElement("text", { x: box.x + box.width / 2, y: box.y + NODE_HEIGHT / 2 })
+        label.textContent = frame
+        group.append(label)
+        svg.append(group)
+    }
+
+    const arrow = svgElement("marker", {
+        id: "tf-arrow",
+        viewBox: "0 0 8 8",
+        refX: 7,
+        refY: 4,
+        markerWidth: 6,
+        markerHeight: 6,
+        orient: "auto-start-reverse",
+        markerUnits: "userSpaceOnUse",
+    })
+    arrow.append(svgElement("path", { d: "M 0 0 L 8 4 L 0 8 z", fill: "rgba(235, 235, 245, 0.45)" }))
+    const defs = svgElement("defs", {})
+    defs.append(arrow)
+    svg.prepend(defs)
+
+    container.replaceChildren(svg)
+}
+
 function renderTf(view) {
     const warnings = element("tf-warnings")
     warnings.hidden = view.warnings.length === 0
@@ -130,58 +308,17 @@ function renderTf(view) {
     }))
     element("settings-badge").hidden = view.warnings.length === 0
 
-    const childrenOf = new Map()
-    for (const link of view.links) {
-        if (!childrenOf.has(link.parent)) {
-            childrenOf.set(link.parent, [])
-        }
-        childrenOf.get(link.parent).push(link)
-    }
-
-    const tree = element("tf-tree")
+    const summary = element("tf-summary")
+    summary.classList.toggle("bad", view.warnings.length > 0)
     if (view.links.length === 0) {
-        tree.textContent = "no tf seen yet"
-        return
+        summary.textContent = "no tf seen yet"
+    } else if (view.warnings.length > 0) {
+        summary.textContent = `${view.warnings.length} problem${view.warnings.length > 1 ? "s" : ""}`
+    } else {
+        summary.textContent = `${view.links.length} transforms, healthy`
     }
 
-    const lines = []
-    const drawn = new Set()
-    const walk = (frame, depth, link) => {
-        const row = document.createElement("div")
-        if (link && link.stale) {
-            row.className = "stale"
-        }
-        const name = document.createElement("span")
-        name.className = "frame"
-        name.textContent = `${"  ".repeat(depth)}${depth ? "└ " : ""}${frame}`
-        row.append(name)
-        if (link) {
-            const tag = document.createElement("span")
-            tag.className = "tag"
-            tag.textContent = link.is_static
-                ? "  static"
-                : `  ${link.seconds_since_seen.toFixed(0)}s ago`
-            row.append(tag)
-        }
-        lines.push(row)
-        // A double parent or a cycle would otherwise recurse forever.
-        if (drawn.has(frame)) {
-            return
-        }
-        drawn.add(frame)
-        for (const child of childrenOf.get(frame) ?? []) {
-            walk(child.child, depth + 1, child)
-        }
-    }
-    for (const root of view.roots) {
-        walk(root, 0, null)
-    }
-    for (const link of view.links) {
-        if (!drawn.has(link.child)) {
-            walk(link.child, 0, link)
-        }
-    }
-    tree.replaceChildren(...lines)
+    renderTfGraph(view)
 }
 
 async function pollTf() {
@@ -400,6 +537,14 @@ function setupSettings() {
     element("settings-button").addEventListener("click", () => show(true))
     element("settings-close").addEventListener("click", () => show(false))
     element("settings-scrim").addEventListener("click", () => show(false))
+
+    const showTf = (open) => {
+        element("tf-panel").hidden = !open
+        element("tf-scrim").hidden = !open
+    }
+    element("tf-open").addEventListener("click", () => showTf(true))
+    element("tf-close").addEventListener("click", () => showTf(false))
+    element("tf-scrim").addEventListener("click", () => showTf(false))
 }
 
 function startCommandLoop() {
