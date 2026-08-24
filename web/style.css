@@ -212,6 +212,12 @@ main {
     backdrop-filter: saturate(180%) blur(20px);
 }
 
+.control button.ghost {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: 0 18px;
+}
+
 .pad {
     position: relative;
     flex: 0 0 auto;
