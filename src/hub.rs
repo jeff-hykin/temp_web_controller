@@ -1,7 +1,10 @@
 use crate::image::{self, EncodedFrame};
 use crate::msgs::{self, ImageMessage};
+use crate::record::{self, Recorder, RecordingStatus};
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -99,6 +102,7 @@ pub struct TopicView {
     pub bytes_per_second: f64,
     pub messages: u64,
     pub seconds_since_seen: f64,
+    pub recorded: bool,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -173,10 +177,15 @@ pub struct Hub {
     command: Mutex<(Command, Instant)>,
     control_clients: AtomicUsize,
     tf: Mutex<HashMap<(String, String), TfEdgeRecord>>,
+    recorder: Mutex<Option<Recorder>>,
+    /// Held as an exclusion set rather than an inclusion set so a topic that
+    /// appears mid-recording is captured without anyone having to opt it in.
+    recording_excluded: RwLock<HashSet<String>>,
+    record_dir: PathBuf,
 }
 
 impl Hub {
-    pub fn new(settings: Settings) -> Arc<Self> {
+    pub fn new(settings: Settings, record_dir: PathBuf) -> Arc<Self> {
         Arc::new(Hub {
             topics: Mutex::new(HashMap::new()),
             streams: RwLock::new(HashMap::new()),
@@ -184,6 +193,9 @@ impl Hub {
             command: Mutex::new((Command::default(), Instant::now())),
             control_clients: AtomicUsize::new(0),
             tf: Mutex::new(HashMap::new()),
+            recorder: Mutex::new(None),
+            recording_excluded: RwLock::new(HashSet::new()),
+            record_dir,
         })
     }
 
@@ -257,11 +269,80 @@ impl Hub {
         if msg_type.as_deref() == Some(msgs::TF_TYPE) {
             return true;
         }
+        // A recording must be complete, so the viewer-based drop optimization
+        // is suspended for whatever the recording is actually capturing.
+        if self.is_recording() && self.is_topic_recorded(&topic) {
+            return true;
+        }
         self.streams
             .read()
             .unwrap()
             .get(&topic)
             .is_some_and(|stream| stream.viewers.load(Ordering::Relaxed) > 0)
+    }
+
+    pub fn is_recording(&self) -> bool {
+        self.recorder.lock().unwrap().is_some()
+    }
+
+    pub fn is_topic_recorded(&self, topic: &str) -> bool {
+        !self.recording_excluded.read().unwrap().contains(topic)
+    }
+
+    pub fn set_topic_recorded(&self, topic: &str, recorded: bool) {
+        let mut excluded = self.recording_excluded.write().unwrap();
+        if recorded {
+            excluded.remove(topic);
+        } else {
+            excluded.insert(topic.to_string());
+        }
+    }
+
+    pub fn recording_status(&self) -> RecordingStatus {
+        match self.recorder.lock().unwrap().as_ref() {
+            Some(recorder) => recorder.status(),
+            None => record::idle_status(),
+        }
+    }
+
+    pub fn start_recording(&self, name: Option<&str>) -> Result<RecordingStatus> {
+        let name = name.map(str::to_string).unwrap_or_else(record::default_name);
+        let path = record::resolve(&self.record_dir, &name)?;
+        let mut slot = self.recorder.lock().unwrap();
+        if slot.is_some() {
+            bail!("already recording");
+        }
+        let recorder = Recorder::start(&path)?;
+        let status = recorder.status();
+        *slot = Some(recorder);
+        Ok(status)
+    }
+
+    pub fn list_recordings(&self) -> Vec<record::RecordingFile> {
+        record::list(&self.record_dir)
+    }
+
+    pub fn delete_recording(&self, name: &str) -> Result<()> {
+        let path = record::resolve(&self.record_dir, name)?;
+        if self
+            .recorder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|recorder| recorder.is_writing_to(&path))
+        {
+            bail!("that recording is still being written");
+        }
+        std::fs::remove_file(&path)?;
+        Ok(())
+    }
+
+    pub fn stop_recording(&self) -> Result<RecordingStatus> {
+        let recorder = self.recorder.lock().unwrap().take();
+        match recorder {
+            Some(recorder) => recorder.finish(),
+            None => bail!("not recording"),
+        }
     }
 
     pub fn record_skipped(&self, transport: Transport, channel: &str, bytes: usize) {
@@ -290,6 +371,11 @@ impl Hub {
         self.touch(transport, topic.clone(), msg_type.clone(), payload.len());
         if msg_type.as_deref() == Some(msgs::TF_TYPE) {
             self.record_tf(&topic, payload);
+        }
+        if self.is_topic_recorded(&topic) {
+            if let Some(recorder) = self.recorder.lock().unwrap().as_ref() {
+                recorder.offer(&topic, msg_type.as_deref(), payload);
+            }
         }
         if !is_image {
             return;
@@ -481,6 +567,7 @@ impl Hub {
                 bytes_per_second: record.bytes_per_second,
                 messages: record.messages,
                 seconds_since_seen: record.last_seen.elapsed().as_secs_f64(),
+                recorded: self.is_topic_recorded(topic),
             })
             .collect();
         views.sort_by(|left, right| left.topic.cmp(&right.topic));
@@ -705,7 +792,7 @@ mod tests {
 
     #[test]
     fn commands_scale_by_the_configured_speeds() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         hub.set_command(Command {
             forward: 1.0,
             strafe: 0.0,
@@ -718,10 +805,13 @@ mod tests {
 
     #[test]
     fn a_stale_command_becomes_zero() {
-        let hub = Hub::new(Settings {
-            deadman_ms: 100,
-            ..Settings::default()
-        });
+        let hub = Hub::new(
+            Settings {
+                deadman_ms: 100,
+                ..Settings::default()
+            },
+            std::env::temp_dir(),
+        );
         hub.set_command(Command {
             forward: 1.0,
             strafe: 0.0,
@@ -733,7 +823,7 @@ mod tests {
 
     #[test]
     fn only_watched_image_topics_are_wanted() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         assert!(!hub.wants_payload("/image#sensor_msgs.Image"));
         let stream = hub.open_stream("/image");
         assert!(hub.wants_payload("/image#sensor_msgs.Image"));
@@ -743,7 +833,7 @@ mod tests {
 
     #[test]
     fn a_healthy_tf_tree_has_one_root_and_no_warnings() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("map", "odom"), ("odom", "base_link")]),
@@ -756,7 +846,7 @@ mod tests {
 
     #[test]
     fn a_child_with_two_parents_is_reported() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("map", "base_link"), ("odom", "base_link")]),
@@ -770,7 +860,7 @@ mod tests {
 
     #[test]
     fn disconnected_trees_are_reported() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("map", "base_link"), ("camera", "lens")]),
@@ -782,7 +872,7 @@ mod tests {
 
     #[test]
     fn a_cycle_is_reported() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("a", "b"), ("b", "c"), ("c", "a")]),
@@ -810,7 +900,7 @@ mod tests {
 
     #[test]
     fn discovery_records_topics_from_both_transports() {
-        let hub = Hub::new(Settings::default());
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
         hub.on_lcm_message("/odom#nav_msgs.Odometry", &[0; 32]);
         hub.on_zenoh_message("scan/sensor_msgs.LaserScan", &[0; 16]);
         hub.tick_rates(Duration::from_secs(1));

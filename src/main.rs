@@ -1,13 +1,16 @@
+mod cdr;
 mod hub;
 mod image;
 mod lcm;
 mod msgs;
+mod record;
 mod web;
 mod zenoh_io;
 
 use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use hub::{Hub, Settings, Transport};
+use std::path::PathBuf;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::time::Duration;
@@ -44,16 +47,24 @@ struct Args {
 
     #[arg(long, default_value_t = 0.5)]
     angular_speed: f64,
+
+    /// Where mcap recordings are written and listed from.
+    #[arg(long, default_value = "recordings")]
+    record_dir: PathBuf,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let hub = Hub::new(Settings {
-        linear_speed: args.linear_speed,
-        angular_speed: args.angular_speed,
-        ..Settings::default()
-    });
+    let record_dir = std::fs::canonicalize(&args.record_dir).unwrap_or(args.record_dir.clone());
+    let hub = Hub::new(
+        Settings {
+            linear_speed: args.linear_speed,
+            angular_speed: args.angular_speed,
+            ..Settings::default()
+        },
+        record_dir,
+    );
 
     let lcm_url = lcm::parse_url(&args.lcm_url)?;
     let lcm_transport = Arc::new(lcm::LcmTransport::new(lcm_url).context("opening lcm socket")?);

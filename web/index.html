@@ -13,6 +13,7 @@
         <div class="brand">
             <span id="link-dot" class="dot"></span>
             <strong>web_ctrl</strong>
+            <span id="record-badge" class="rec-pill" hidden>REC</span>
         </div>
         <div id="publish-target" class="pill">connecting</div>
     </header>
@@ -27,6 +28,18 @@
     <section class="control">
         <div id="pad" class="pad">
             <div id="pad-knob" class="knob"></div>
+        </div>
+
+        <div id="dpad" class="dpad" aria-label="Direction buttons">
+            <button class="dpad-key" data-key="q" aria-label="Strafe left">&#8676;</button>
+            <button class="dpad-key" data-key="w" aria-label="Forward">&#8593;</button>
+            <button class="dpad-key" data-key="e" aria-label="Strafe right">&#8677;</button>
+            <button class="dpad-key" data-key="a" aria-label="Turn left">&#8630;</button>
+            <button class="dpad-key stop" data-key="stop" aria-label="Stop">STOP</button>
+            <button class="dpad-key" data-key="d" aria-label="Turn right">&#8631;</button>
+            <span></span>
+            <button class="dpad-key" data-key="s" aria-label="Back">&#8595;</button>
+            <span></span>
         </div>
 
         <dl class="readout">
@@ -108,6 +121,10 @@
                 <span>Transform tree</span>
                 <em id="tf-summary">no tf seen yet</em>
             </button>
+            <button id="record-open" class="row link">
+                <span>Recording</span>
+                <em id="record-summary">idle</em>
+            </button>
         </div>
 
         <div class="group">
@@ -125,6 +142,30 @@
         <div id="tf-warnings" class="warnings" hidden></div>
         <div id="tf-graph" class="tf-graph"></div>
         <p class="hint-text">Solid arrows are live. Dashed red means the transform stopped arriving; a red frame has two parents or sits in a cycle.</p>
+    </aside>
+
+    <div id="record-scrim" class="scrim" hidden></div>
+    <aside id="record-panel" class="panel" hidden aria-label="Recording">
+        <div class="settings-head">
+            <h2>Recording</h2>
+            <button id="record-close" class="ghost">Done</button>
+        </div>
+
+        <div class="record-bar">
+            <button id="record-toggle" class="record-button">Start recording</button>
+            <span id="record-stats" class="record-stats">idle</span>
+        </div>
+
+        <div class="group">
+            <p class="group-title">Topics to record</p>
+            <div id="record-topics" class="record-topics"></div>
+            <p class="hint-text">New topics are recorded automatically. Uncheck one to leave it out.</p>
+        </div>
+
+        <div class="group">
+            <p class="group-title">Saved recordings</p>
+            <div id="record-files" class="record-files"></div>
+        </div>
     </aside>
 
     <script src="/app.js"></script>

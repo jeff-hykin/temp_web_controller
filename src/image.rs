@@ -178,6 +178,8 @@ mod tests {
 
     fn gray_image(width: usize, height: usize) -> RawImage {
         RawImage {
+            header: crate::msgs::Header { stamp_sec: 0, stamp_nsec: 0, frame_id: String::new() },
+            is_bigendian: 0,
             width,
             height,
             step: width,
@@ -213,6 +215,8 @@ mod tests {
     #[test]
     fn depth_frames_become_colour() {
         let image = RawImage {
+            header: crate::msgs::Header { stamp_sec: 0, stamp_nsec: 0, frame_id: String::new() },
+            is_bigendian: 0,
             width: 4,
             height: 2,
             step: 8,

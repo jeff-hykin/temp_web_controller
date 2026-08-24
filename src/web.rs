@@ -3,7 +3,8 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::http::StatusCode;
+use axum::routing::{delete, get};
 use axum::Router;
 use bytes::Bytes;
 use serde::Deserialize;
@@ -27,6 +28,8 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/status", get(status))
         .route("/api/tf", get(tf))
+        .route("/api/recordings", get(recordings))
+        .route("/api/recordings/{name}", delete(remove_recording))
         .route("/ws", get(control_socket))
         .route("/ws/stream/{*topic}", get(stream_socket))
         .with_state(state)
@@ -64,12 +67,28 @@ async fn tf(State(state): State<AppState>) -> Response {
     axum::Json(state.hub.tf_view()).into_response()
 }
 
+async fn recordings(State(state): State<AppState>) -> Response {
+    axum::Json(state.hub.list_recordings()).into_response()
+}
+
+async fn remove_recording(Path(name): Path<String>, State(state): State<AppState>) -> Response {
+    match state.hub.delete_recording(&name) {
+        Ok(()) => axum::Json(json!({ "ok": true })).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(json!({ "error": error.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 fn status_payload(state: &AppState) -> serde_json::Value {
     json!({
         "type": "status",
         "topics": state.hub.topic_views(),
         "settings": state.hub.settings(),
         "streams": state.hub.stream_stats(),
+        "recording": state.hub.recording_status(),
         "publish": {
             "topic": state.publish_topic,
             "lcm": state.lcm_enabled,
@@ -90,6 +109,15 @@ enum ClientMessage {
         turn: f64,
     },
     Settings(SettingsPatch),
+    Record {
+        #[serde(default)]
+        path: Option<String>,
+    },
+    StopRecord,
+    RecordTopic {
+        topic: String,
+        recorded: bool,
+    },
 }
 
 async fn control_socket(upgrade: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -115,6 +143,19 @@ async fn run_control_socket(mut socket: WebSocket, state: AppState) {
                     }
                     Ok(ClientMessage::Settings(patch)) => {
                         state.hub.apply_settings(patch);
+                    }
+                    Ok(ClientMessage::Record { path }) => {
+                        if let Err(error) = state.hub.start_recording(path.as_deref()) {
+                            eprintln!("could not start recording: {error}");
+                        }
+                    }
+                    Ok(ClientMessage::StopRecord) => {
+                        if let Err(error) = state.hub.stop_recording() {
+                            eprintln!("could not stop recording: {error}");
+                        }
+                    }
+                    Ok(ClientMessage::RecordTopic { topic, recorded }) => {
+                        state.hub.set_topic_recorded(&topic, recorded);
                     }
                     Err(error) => eprintln!("ignoring malformed control message: {error}"),
                 }

@@ -47,7 +47,156 @@ function applyStatus(status) {
     renderCameras(status.topics)
     renderTopics(status.topics)
     renderTileStats(status.streams)
+    renderRecording(status.recording, status.topics)
     renderValues()
+}
+
+const formatBytes = (bytes) => {
+    if (bytes < 1024) {
+        return `${bytes} B`
+    }
+    if (bytes < 1024 * 1024) {
+        return `${(bytes / 1024).toFixed(0)} KB`
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+        return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+    }
+    return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
+}
+
+const formatAge = (seconds) => {
+    if (seconds < 90) {
+        return `${seconds.toFixed(0)}s ago`
+    }
+    if (seconds < 3600) {
+        return `${(seconds / 60).toFixed(0)}m ago`
+    }
+    if (seconds < 86400) {
+        return `${(seconds / 3600).toFixed(0)}h ago`
+    }
+    return `${(seconds / 86400).toFixed(0)}d ago`
+}
+
+function renderRecording(recording, topics) {
+    if (!recording) {
+        return
+    }
+    const wasRecording = state.recording?.active
+    state.recording = recording
+
+    const toggle = element("record-toggle")
+    toggle.textContent = recording.active ? "Stop recording" : "Start recording"
+    toggle.classList.toggle("on", recording.active)
+
+    const summary = recording.active
+        ? `${recording.messages} msgs · ${formatBytes(recording.bytes)}`
+        : "idle"
+    element("record-summary").textContent = summary
+    element("record-badge").hidden = !recording.active
+
+    const dropped = recording.dropped > 0 ? ` · ${recording.dropped} dropped` : ""
+    element("record-stats").textContent = recording.active
+        ? `${recording.path.split("/").pop()} · ${recording.seconds.toFixed(0)}s · ${recording.messages} msgs · ${formatBytes(recording.bytes)}${dropped}`
+        : "idle"
+
+    renderRecordTopics(topics)
+    // A finished file only shows up in the listing once it is closed.
+    if (wasRecording && !recording.active) {
+        pollRecordings()
+    }
+}
+
+function renderRecordTopics(topics) {
+    const list = element("record-topics")
+    list.replaceChildren(...topics.map((topic) => {
+        const row = document.createElement("label")
+        row.className = "record-topic"
+        const box = document.createElement("input")
+        box.type = "checkbox"
+        box.checked = topic.recorded
+        box.addEventListener("change", () => {
+            send({ type: "record_topic", topic: topic.topic, recorded: box.checked })
+        })
+        const name = document.createElement("span")
+        name.textContent = topic.topic
+        const type = document.createElement("em")
+        type.textContent = topic.msg_type ?? "?"
+        row.append(box, name, type)
+        return row
+    }))
+}
+
+async function pollRecordings() {
+    let files = []
+    try {
+        files = await (await fetch("/api/recordings")).json()
+    } catch {
+        return
+    }
+    const list = element("record-files")
+    if (files.length === 0) {
+        list.replaceChildren(Object.assign(document.createElement("p"), {
+            className: "hint-text",
+            textContent: "nothing recorded yet",
+        }))
+        return
+    }
+    list.replaceChildren(...files.map((file) => {
+        const row = document.createElement("div")
+        row.className = "record-file"
+
+        const name = document.createElement("span")
+        name.textContent = file.name
+        const meta = document.createElement("em")
+        meta.textContent = `${formatBytes(file.bytes)} · ${formatAge(file.seconds_old)}`
+
+        const copy = document.createElement("button")
+        copy.className = "ghost small"
+        copy.textContent = "Path"
+        copy.addEventListener("click", async () => {
+            await copyText(file.path)
+            copy.textContent = "Copied"
+            setTimeout(() => { copy.textContent = "Path" }, 1200)
+        })
+
+        const remove = document.createElement("button")
+        remove.className = "ghost small danger"
+        remove.textContent = "Delete"
+        remove.addEventListener("click", async () => {
+            if (remove.dataset.armed !== "yes") {
+                remove.dataset.armed = "yes"
+                remove.textContent = "Sure?"
+                setTimeout(() => {
+                    remove.dataset.armed = "no"
+                    remove.textContent = "Delete"
+                }, 3000)
+                return
+            }
+            await fetch(`/api/recordings/${encodeURIComponent(file.name)}`, { method: "DELETE" })
+            pollRecordings()
+        })
+
+        row.append(name, meta, copy, remove)
+        return row
+    }))
+}
+
+/// The clipboard API needs a secure context, which a plain LAN http page is
+/// not, so fall back to a throwaway selection.
+async function copyText(text) {
+    try {
+        await navigator.clipboard.writeText(text)
+        return
+    } catch {
+        const scratch = document.createElement("textarea")
+        scratch.value = text
+        scratch.style.position = "fixed"
+        scratch.style.opacity = "0"
+        document.body.append(scratch)
+        scratch.select()
+        document.execCommand("copy")
+        scratch.remove()
+    }
 }
 
 function renderValues() {
@@ -398,8 +547,37 @@ function updateAxesFromKeys() {
     state.axes.forward = (held("w", "arrowup") ? 1 : 0) - (held("s", "arrowdown") ? 1 : 0)
     state.axes.turn = (held("d", "arrowright") ? 1 : 0) - (held("a", "arrowleft") ? 1 : 0)
     state.axes.strafe = (held("e") ? 1 : 0) - (held("q") ? 1 : 0)
-    for (const span of document.querySelectorAll(".keys span")) {
+    for (const span of document.querySelectorAll(".keys span, .dpad-key")) {
         span.classList.toggle("down", state.keys.has(span.dataset.key))
+    }
+}
+
+/// The buttons feed the same held-key set as the keyboard, so a press pins one
+/// axis to exactly full scale, which is what driving perfectly straight for a
+/// recording needs and what a stick cannot give you.
+function setupButtons() {
+    for (const button of document.querySelectorAll(".dpad-key")) {
+        const key = button.dataset.key
+        const apply = () => {
+            updateAxesFromKeys()
+            renderValues()
+        }
+        button.addEventListener("pointerdown", (event) => {
+            event.preventDefault()
+            button.setPointerCapture(event.pointerId)
+            if (key === "stop") {
+                state.keys.clear()
+            } else {
+                state.keys.add(key)
+            }
+            apply()
+        })
+        for (const name of ["pointerup", "pointercancel"]) {
+            button.addEventListener(name, () => {
+                state.keys.delete(key)
+                apply()
+            })
+        }
     }
 }
 
@@ -545,6 +723,21 @@ function setupSettings() {
     element("tf-open").addEventListener("click", () => showTf(true))
     element("tf-close").addEventListener("click", () => showTf(false))
     element("tf-scrim").addEventListener("click", () => showTf(false))
+
+    const showRecord = (open) => {
+        element("record-panel").hidden = !open
+        element("record-scrim").hidden = !open
+        if (open) {
+            pollRecordings()
+        }
+    }
+    element("record-open").addEventListener("click", () => showRecord(true))
+    element("record-close").addEventListener("click", () => showRecord(false))
+    element("record-scrim").addEventListener("click", () => showRecord(false))
+
+    element("record-toggle").addEventListener("click", () => {
+        send({ type: state.recording?.active ? "stop_record" : "record" })
+    })
 }
 
 function startCommandLoop() {
@@ -569,6 +762,7 @@ document.addEventListener("visibilitychange", () => {
 
 setupKeyboard()
 setupPad()
+setupButtons()
 setupSettings()
 connectControl()
 startCommandLoop()

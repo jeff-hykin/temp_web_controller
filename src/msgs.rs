@@ -48,6 +48,10 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into()?))
     }
 
+    fn f64(&mut self) -> Result<f64> {
+        Ok(f64::from_be_bytes(self.take(8)?.try_into()?))
+    }
+
     fn string(&mut self) -> Result<String> {
         let length = self.u32()? as usize;
         if length == 0 {
@@ -65,15 +69,24 @@ impl<'a> Reader<'a> {
     }
 }
 
+pub struct Header {
+    pub stamp_sec: i32,
+    pub stamp_nsec: i32,
+    pub frame_id: String,
+}
+
 pub struct RawImage {
+    pub header: Header,
     pub width: usize,
     pub height: usize,
     pub step: usize,
+    pub is_bigendian: u8,
     pub encoding: String,
     pub data: Vec<u8>,
 }
 
 pub struct CompressedImage {
+    pub header: Header,
     pub format: String,
     pub data: Vec<u8>,
 }
@@ -83,32 +96,39 @@ pub enum ImageMessage {
     Compressed(CompressedImage),
 }
 
-fn skip_header(reader: &mut Reader) -> Result<()> {
+/// The leading `seq` is read and dropped: ROS2 headers do not carry one.
+fn read_header(reader: &mut Reader) -> Result<Header> {
     reader.i32()?;
-    reader.i32()?;
-    reader.i32()?;
-    reader.string()?;
-    Ok(())
+    let stamp_sec = reader.i32()?;
+    let stamp_nsec = reader.i32()?;
+    let frame_id = reader.string()?;
+    Ok(Header {
+        stamp_sec,
+        stamp_nsec,
+        frame_id,
+    })
 }
 
 pub fn decode_image(payload: &[u8]) -> Result<ImageMessage> {
     let mut reader = Reader::new(payload);
     reader.expect_fingerprint(&IMAGE_FINGERPRINT)?;
     let data_length = reader.i32()?;
-    skip_header(&mut reader)?;
+    let header = read_header(&mut reader)?;
     let height = reader.i32()?;
     let width = reader.i32()?;
     let encoding = reader.string()?;
-    reader.u8()?;
+    let is_bigendian = reader.u8()?;
     let step = reader.i32()?;
     if data_length < 0 || height <= 0 || width <= 0 || step < 0 {
         bail!("nonsense image dimensions");
     }
     let data = reader.take(data_length as usize)?.to_vec();
     Ok(ImageMessage::Raw(RawImage {
+        header,
         width: width as usize,
         height: height as usize,
         step: step as usize,
+        is_bigendian,
         encoding,
         data,
     }))
@@ -118,13 +138,14 @@ pub fn decode_compressed_image(payload: &[u8]) -> Result<ImageMessage> {
     let mut reader = Reader::new(payload);
     reader.expect_fingerprint(&COMPRESSED_IMAGE_FINGERPRINT)?;
     let data_length = reader.i32()?;
-    skip_header(&mut reader)?;
+    let header = read_header(&mut reader)?;
     let format = reader.string()?;
     if data_length < 0 {
         bail!("negative compressed image length");
     }
     let data = reader.take(data_length as usize)?.to_vec();
     Ok(ImageMessage::Compressed(CompressedImage {
+        header,
         format,
         data,
     }))
@@ -139,8 +160,11 @@ pub fn decode_any_image(msg_type: &str, payload: &[u8]) -> Result<ImageMessage> 
 }
 
 pub struct TfEdge {
+    pub header: Header,
     pub parent: String,
     pub child: String,
+    pub translation: [f64; 3],
+    pub rotation: [f64; 4],
 }
 
 pub fn decode_tf(payload: &[u8]) -> Result<Vec<TfEdge>> {
@@ -152,15 +176,36 @@ pub fn decode_tf(payload: &[u8]) -> Result<Vec<TfEdge>> {
     }
     let mut edges = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        reader.i32()?;
-        reader.i32()?;
-        reader.i32()?;
-        let parent = reader.string()?;
+        let header = read_header(&mut reader)?;
         let child = reader.string()?;
-        reader.take(56)?;
-        edges.push(TfEdge { parent, child });
+        let mut translation = [0.0; 3];
+        for axis in translation.iter_mut() {
+            *axis = reader.f64()?;
+        }
+        let mut rotation = [0.0; 4];
+        for term in rotation.iter_mut() {
+            *term = reader.f64()?;
+        }
+        edges.push(TfEdge {
+            parent: header.frame_id.clone(),
+            child,
+            header,
+            translation,
+            rotation,
+        });
     }
     Ok(edges)
+}
+
+pub fn decode_twist(payload: &[u8]) -> Result<([f64; 3], [f64; 3])> {
+    let mut reader = Reader::new(payload);
+    reader.expect_fingerprint(&TWIST_FINGERPRINT)?;
+    let mut linear = [0.0; 3];
+    let mut angular = [0.0; 3];
+    for axis in linear.iter_mut().chain(angular.iter_mut()) {
+        *axis = reader.f64()?;
+    }
+    Ok((linear, angular))
 }
 
 pub fn encode_twist(linear: [f64; 3], angular: [f64; 3]) -> Vec<u8> {
