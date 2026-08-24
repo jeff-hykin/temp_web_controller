@@ -1,7 +1,7 @@
 use crate::image::{self, EncodedFrame};
 use crate::msgs::{self, ImageMessage};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -10,6 +10,10 @@ use tokio::sync::watch;
 const MIN_QUALITY: u8 = 25;
 const MAX_QUALITY: u8 = 85;
 const MIN_WIDTH: usize = 320;
+
+const TF_STALE: Duration = Duration::from_secs(10);
+const TF_FORGET: Duration = Duration::from_secs(120);
+const TF_MAX_EDGES: usize = 512;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -112,6 +116,29 @@ pub struct StreamStats {
     pub error: Option<String>,
 }
 
+struct TfEdgeRecord {
+    last_seen: Instant,
+    is_static: bool,
+    messages: u64,
+}
+
+#[derive(Serialize)]
+pub struct TfLink {
+    pub parent: String,
+    pub child: String,
+    pub is_static: bool,
+    pub messages: u64,
+    pub seconds_since_seen: f64,
+    pub stale: bool,
+}
+
+#[derive(Serialize, Default)]
+pub struct TfView {
+    pub links: Vec<TfLink>,
+    pub roots: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 struct Pending {
     msg_type: String,
     payload: Vec<u8>,
@@ -145,6 +172,7 @@ pub struct Hub {
     settings: Mutex<Settings>,
     command: Mutex<(Command, Instant)>,
     control_clients: AtomicUsize,
+    tf: Mutex<HashMap<(String, String), TfEdgeRecord>>,
 }
 
 impl Hub {
@@ -155,6 +183,7 @@ impl Hub {
             settings: Mutex::new(settings),
             command: Mutex::new((Command::default(), Instant::now())),
             control_clients: AtomicUsize::new(0),
+            tf: Mutex::new(HashMap::new()),
         })
     }
 
@@ -224,7 +253,10 @@ impl Hub {
     }
 
     pub fn wants_payload(&self, channel: &str) -> bool {
-        let (topic, _) = parse_lcm_channel(channel);
+        let (topic, msg_type) = parse_lcm_channel(channel);
+        if msg_type.as_deref() == Some(msgs::TF_TYPE) {
+            return true;
+        }
         self.streams
             .read()
             .unwrap()
@@ -256,6 +288,9 @@ impl Hub {
     ) {
         let is_image = msg_type.as_deref().is_some_and(msgs::is_image_type);
         self.touch(transport, topic.clone(), msg_type.clone(), payload.len());
+        if msg_type.as_deref() == Some(msgs::TF_TYPE) {
+            self.record_tf(&topic, payload);
+        }
         if !is_image {
             return;
         }
@@ -277,6 +312,121 @@ impl Hub {
         });
         drop(slot);
         stream.ready.notify_one();
+    }
+
+    fn record_tf(&self, topic: &str, payload: &[u8]) {
+        let Ok(edges) = msgs::decode_tf(payload) else {
+            return;
+        };
+        let is_static = topic.contains("static");
+        let now = Instant::now();
+        let mut tf = self.tf.lock().unwrap();
+        tf.retain(|_, record| record.is_static || record.last_seen.elapsed() < TF_FORGET);
+        for edge in edges {
+            let key = (normalize(&edge.child), normalize(&edge.parent));
+            if key.0.is_empty() || key.1.is_empty() {
+                continue;
+            }
+            if !tf.contains_key(&key) && tf.len() >= TF_MAX_EDGES {
+                continue;
+            }
+            let record = tf.entry(key).or_insert(TfEdgeRecord {
+                last_seen: now,
+                is_static,
+                messages: 0,
+            });
+            record.last_seen = now;
+            record.is_static = is_static;
+            record.messages += 1;
+        }
+    }
+
+    pub fn tf_view(&self) -> TfView {
+        let tf = self.tf.lock().unwrap();
+        let mut links: Vec<TfLink> = tf
+            .iter()
+            .map(|((child, parent), record)| TfLink {
+                parent: parent.clone(),
+                child: child.clone(),
+                is_static: record.is_static,
+                messages: record.messages,
+                seconds_since_seen: record.last_seen.elapsed().as_secs_f64(),
+                stale: !record.is_static && record.last_seen.elapsed() > TF_STALE,
+            })
+            .collect();
+        drop(tf);
+        links.sort_by(|left, right| {
+            (&left.parent, &left.child).cmp(&(&right.parent, &right.child))
+        });
+
+        let mut parents_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut children_of: HashMap<&str, Vec<&str>> = HashMap::new();
+        let mut frames: BTreeSet<&str> = BTreeSet::new();
+        for link in &links {
+            parents_of.entry(&link.child).or_default().push(&link.parent);
+            children_of.entry(&link.parent).or_default().push(&link.child);
+            frames.insert(&link.parent);
+            frames.insert(&link.child);
+        }
+
+        let mut warnings = Vec::new();
+        for (child, parents) in &parents_of {
+            if parents.len() > 1 {
+                let mut named: Vec<&str> = parents.clone();
+                named.sort_unstable();
+                warnings.push(format!(
+                    "{child} has {} parents: {}",
+                    named.len(),
+                    named.join(", ")
+                ));
+            }
+        }
+
+        let roots: Vec<String> = frames
+            .iter()
+            .filter(|frame| !parents_of.contains_key(**frame))
+            .map(|frame| (*frame).to_owned())
+            .collect();
+
+        let mut reached: HashSet<&str> = HashSet::new();
+        let mut queue: Vec<&str> = roots.iter().map(|frame| frame.as_str()).collect();
+        while let Some(frame) = queue.pop() {
+            if !reached.insert(frame) {
+                continue;
+            }
+            if let Some(children) = children_of.get(frame) {
+                queue.extend(children.iter().copied());
+            }
+        }
+
+        let orphans: Vec<&str> = frames
+            .iter()
+            .filter(|frame| !reached.contains(**frame))
+            .copied()
+            .collect();
+        if !orphans.is_empty() {
+            warnings.push(format!("cycle in tf, unreachable frames: {}", orphans.join(", ")));
+        }
+        if roots.len() > 1 {
+            warnings.push(format!(
+                "tf is disjoint, {} separate trees rooted at: {}",
+                roots.len(),
+                roots.join(", ")
+            ));
+        }
+        for link in links.iter().filter(|link| link.stale) {
+            warnings.push(format!(
+                "{} -> {} last seen {:.0}s ago",
+                link.parent, link.child, link.seconds_since_seen
+            ));
+        }
+        warnings.sort();
+
+        TfView {
+            links,
+            roots,
+            warnings,
+        }
     }
 
     fn touch(
@@ -589,6 +739,73 @@ mod tests {
         assert!(hub.wants_payload("/image#sensor_msgs.Image"));
         hub.close_stream(&stream);
         assert!(!hub.wants_payload("/image#sensor_msgs.Image"));
+    }
+
+    #[test]
+    fn a_healthy_tf_tree_has_one_root_and_no_warnings() {
+        let hub = Hub::new(Settings::default());
+        hub.on_lcm_message(
+            "/tf#tf2_msgs.TFMessage",
+            &tf_payload(&[("map", "odom"), ("odom", "base_link")]),
+        );
+        let view = hub.tf_view();
+        assert_eq!(view.roots, vec!["map".to_owned()]);
+        assert_eq!(view.links.len(), 2);
+        assert!(view.warnings.is_empty(), "{:?}", view.warnings);
+    }
+
+    #[test]
+    fn a_child_with_two_parents_is_reported() {
+        let hub = Hub::new(Settings::default());
+        hub.on_lcm_message(
+            "/tf#tf2_msgs.TFMessage",
+            &tf_payload(&[("map", "base_link"), ("odom", "base_link")]),
+        );
+        let warnings = hub.tf_view().warnings;
+        assert!(
+            warnings.iter().any(|warning| warning == "base_link has 2 parents: map, odom"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn disconnected_trees_are_reported() {
+        let hub = Hub::new(Settings::default());
+        hub.on_lcm_message(
+            "/tf#tf2_msgs.TFMessage",
+            &tf_payload(&[("map", "base_link"), ("camera", "lens")]),
+        );
+        let view = hub.tf_view();
+        assert_eq!(view.roots, vec!["camera".to_owned(), "map".to_owned()]);
+        assert!(view.warnings.iter().any(|warning| warning.contains("disjoint")));
+    }
+
+    #[test]
+    fn a_cycle_is_reported() {
+        let hub = Hub::new(Settings::default());
+        hub.on_lcm_message(
+            "/tf#tf2_msgs.TFMessage",
+            &tf_payload(&[("a", "b"), ("b", "c"), ("c", "a")]),
+        );
+        let view = hub.tf_view();
+        assert!(view.roots.is_empty());
+        assert!(view.warnings.iter().any(|warning| warning.contains("cycle")));
+    }
+
+    fn tf_payload(edges: &[(&str, &str)]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&msgs::TF_FINGERPRINT);
+        payload.extend_from_slice(&(edges.len() as i32).to_be_bytes());
+        for (parent, child) in edges {
+            payload.extend_from_slice(&[0u8; 12]);
+            for name in [parent, child] {
+                payload.extend_from_slice(&((name.len() + 1) as u32).to_be_bytes());
+                payload.extend_from_slice(name.as_bytes());
+                payload.push(0);
+            }
+            payload.extend_from_slice(&[0u8; 56]);
+        }
+        payload
     }
 
     #[test]

@@ -120,6 +120,78 @@ function renderTileStats(streams) {
     }
 }
 
+function renderTf(view) {
+    const warnings = element("tf-warnings")
+    warnings.hidden = view.warnings.length === 0
+    warnings.replaceChildren(...view.warnings.map((text) => {
+        const line = document.createElement("span")
+        line.textContent = text
+        return line
+    }))
+    element("settings-badge").hidden = view.warnings.length === 0
+
+    const childrenOf = new Map()
+    for (const link of view.links) {
+        if (!childrenOf.has(link.parent)) {
+            childrenOf.set(link.parent, [])
+        }
+        childrenOf.get(link.parent).push(link)
+    }
+
+    const tree = element("tf-tree")
+    if (view.links.length === 0) {
+        tree.textContent = "no tf seen yet"
+        return
+    }
+
+    const lines = []
+    const drawn = new Set()
+    const walk = (frame, depth, link) => {
+        const row = document.createElement("div")
+        if (link && link.stale) {
+            row.className = "stale"
+        }
+        const name = document.createElement("span")
+        name.className = "frame"
+        name.textContent = `${"  ".repeat(depth)}${depth ? "└ " : ""}${frame}`
+        row.append(name)
+        if (link) {
+            const tag = document.createElement("span")
+            tag.className = "tag"
+            tag.textContent = link.is_static
+                ? "  static"
+                : `  ${link.seconds_since_seen.toFixed(0)}s ago`
+            row.append(tag)
+        }
+        lines.push(row)
+        // A double parent or a cycle would otherwise recurse forever.
+        if (drawn.has(frame)) {
+            return
+        }
+        drawn.add(frame)
+        for (const child of childrenOf.get(frame) ?? []) {
+            walk(child.child, depth + 1, child)
+        }
+    }
+    for (const root of view.roots) {
+        walk(root, 0, null)
+    }
+    for (const link of view.links) {
+        if (!drawn.has(link.child)) {
+            walk(link.child, 0, link)
+        }
+    }
+    tree.replaceChildren(...lines)
+}
+
+async function pollTf() {
+    try {
+        renderTf(await (await fetch("/api/tf")).json())
+    } catch {
+        // The control socket already reports the link being down.
+    }
+}
+
 function toggleStream(topic) {
     if (state.watching.has(topic)) {
         state.watching.delete(topic)
@@ -355,3 +427,5 @@ setupPad()
 setupSettings()
 connectControl()
 startCommandLoop()
+pollTf()
+setInterval(pollTf, 2000)

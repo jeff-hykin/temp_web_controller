@@ -56,7 +56,7 @@
             </label>
         </div>
 
-        <button id="settings-button" class="ghost" aria-label="Settings">Settings</button>
+        <button id="settings-button" class="ghost" aria-label="Settings">Settings<span id="settings-badge" class="badge" hidden></span></button>
     </section>
 
     <div id="settings-scrim" class="scrim" hidden></div>
@@ -100,6 +100,12 @@
                 <span>Max width <em id="label-max-width"></em></span>
                 <input type="range" id="max-width" min="320" max="1920" step="160">
             </label>
+        </div>
+
+        <div class="group">
+            <p class="group-title">Transform tree</p>
+            <div id="tf-warnings" class="warnings" hidden></div>
+            <div id="tf-tree" class="tf-tree"></div>
         </div>
 
         <div class="group">

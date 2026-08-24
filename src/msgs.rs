@@ -3,6 +3,7 @@ use anyhow::{bail, Result};
 pub const TWIST_TYPE: &str = "geometry_msgs.Twist";
 pub const IMAGE_TYPE: &str = "sensor_msgs.Image";
 pub const COMPRESSED_IMAGE_TYPE: &str = "sensor_msgs.CompressedImage";
+pub const TF_TYPE: &str = "tf2_msgs.TFMessage";
 
 // LCM fingerprints, extracted from the generated dimos-lcm python types. A
 // publisher that sends the wrong 8 bytes is silently ignored by every dimos
@@ -10,6 +11,7 @@ pub const COMPRESSED_IMAGE_TYPE: &str = "sensor_msgs.CompressedImage";
 pub const TWIST_FINGERPRINT: [u8; 8] = [0x2e, 0x7c, 0x07, 0xd7, 0xcd, 0xf7, 0xe0, 0x27];
 pub const IMAGE_FINGERPRINT: [u8; 8] = [0x53, 0x5c, 0xfa, 0xce, 0x1f, 0x4f, 0x57, 0x17];
 pub const COMPRESSED_IMAGE_FINGERPRINT: [u8; 8] = [0xb8, 0xd0, 0x11, 0xc1, 0x04, 0x12, 0xb9, 0xa1];
+pub const TF_FINGERPRINT: [u8; 8] = [0xc2, 0xb8, 0xa1, 0xc3, 0x3a, 0x89, 0x23, 0xec];
 
 pub fn is_image_type(msg_type: &str) -> bool {
     msg_type == IMAGE_TYPE || msg_type == COMPRESSED_IMAGE_TYPE
@@ -136,6 +138,31 @@ pub fn decode_any_image(msg_type: &str, payload: &[u8]) -> Result<ImageMessage> 
     }
 }
 
+pub struct TfEdge {
+    pub parent: String,
+    pub child: String,
+}
+
+pub fn decode_tf(payload: &[u8]) -> Result<Vec<TfEdge>> {
+    let mut reader = Reader::new(payload);
+    reader.expect_fingerprint(&TF_FINGERPRINT)?;
+    let count = reader.i32()?;
+    if !(0..=4096).contains(&count) {
+        bail!("nonsense transform count");
+    }
+    let mut edges = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        reader.i32()?;
+        reader.i32()?;
+        reader.i32()?;
+        let parent = reader.string()?;
+        let child = reader.string()?;
+        reader.take(56)?;
+        edges.push(TfEdge { parent, child });
+    }
+    Ok(edges)
+}
+
 pub fn encode_twist(linear: [f64; 3], angular: [f64; 3]) -> Vec<u8> {
     let mut out = Vec::with_capacity(56);
     out.extend_from_slice(&TWIST_FINGERPRINT);
@@ -185,6 +212,27 @@ mod tests {
         assert_eq!(image.step, 9);
         assert_eq!(image.encoding, "rgb8");
         assert_eq!(image.data, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn tf_round_trips() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&TF_FINGERPRINT);
+        payload.extend_from_slice(&2i32.to_be_bytes());
+        for (parent, child) in [("odom", "base_link"), ("base_link", "camera_link")] {
+            payload.extend_from_slice(&0i32.to_be_bytes());
+            payload.extend_from_slice(&0i32.to_be_bytes());
+            payload.extend_from_slice(&0i32.to_be_bytes());
+            push_string(&mut payload, parent);
+            push_string(&mut payload, child);
+            payload.extend_from_slice(&[0u8; 56]);
+        }
+
+        let edges = decode_tf(&payload).unwrap();
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].parent, "odom");
+        assert_eq!(edges[0].child, "base_link");
+        assert_eq!(edges[1].child, "camera_link");
     }
 
     #[test]

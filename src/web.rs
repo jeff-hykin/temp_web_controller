@@ -26,6 +26,7 @@ pub fn router(state: AppState) -> Router {
         .route("/style.css", get(stylesheet))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/status", get(status))
+        .route("/api/tf", get(tf))
         .route("/ws", get(control_socket))
         .route("/ws/stream/{*topic}", get(stream_socket))
         .with_state(state)
@@ -57,6 +58,10 @@ async fn stylesheet() -> Response {
 
 async fn status(State(state): State<AppState>) -> Response {
     axum::Json(status_payload(&state)).into_response()
+}
+
+async fn tf(State(state): State<AppState>) -> Response {
+    axum::Json(state.hub.tf_view()).into_response()
 }
 
 fn status_payload(state: &AppState) -> serde_json::Value {
