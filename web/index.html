@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+    <meta name="theme-color" content="#0d1117">
+    <title>web_ctrl</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="icon" href="data:,">
+</head>
+<body>
+    <header>
+        <div class="brand">
+            <span id="link-dot" class="dot"></span>
+            <strong>web_ctrl</strong>
+        </div>
+        <div id="publish-target" class="muted">connecting</div>
+        <button id="settings-button" class="ghost" aria-label="settings">settings</button>
+    </header>
+
+    <main>
+        <section id="streams" class="streams">
+            <p id="streams-empty" class="empty">Waiting for image topics&hellip;</p>
+        </section>
+
+        <nav id="camera-picker" class="picker" aria-label="camera topics"></nav>
+    </main>
+
+    <section class="control">
+        <div class="pad-wrap">
+            <div id="pad" class="pad">
+                <div id="pad-knob" class="knob"></div>
+                <span class="pad-label">drag to drive</span>
+            </div>
+        </div>
+        <div class="readout">
+            <div class="keys" aria-hidden="true">
+                <span data-key="w">W</span>
+                <div>
+                    <span data-key="a">A</span>
+                    <span data-key="s">S</span>
+                    <span data-key="d">D</span>
+                </div>
+            </div>
+            <dl>
+                <div><dt>linear</dt><dd id="value-linear">0.00 m/s</dd></div>
+                <div><dt>angular</dt><dd id="value-angular">0.00 rad/s</dd></div>
+            </dl>
+            <label class="toggle">
+                <input type="checkbox" id="strafe-mode">
+                <span>sideways instead of turn</span>
+            </label>
+        </div>
+    </section>
+
+    <aside id="settings" class="settings" hidden>
+        <div class="settings-head">
+            <strong>Settings</strong>
+            <button id="settings-close" class="ghost">done</button>
+        </div>
+
+        <label class="slider">
+            <span>Linear speed <em id="label-linear-speed"></em></span>
+            <input type="range" id="linear-speed" min="0.05" max="1.5" step="0.05">
+        </label>
+        <label class="slider">
+            <span>Angular speed <em id="label-angular-speed"></em></span>
+            <input type="range" id="angular-speed" min="0.1" max="3" step="0.1">
+        </label>
+        <label class="slider">
+            <span>Publish rate <em id="label-publish-hz"></em></span>
+            <input type="range" id="publish-hz" min="5" max="60" step="5">
+        </label>
+        <label class="slider">
+            <span>Stop after silence <em id="label-deadman"></em></span>
+            <input type="range" id="deadman-ms" min="100" max="2000" step="50">
+        </label>
+        <label class="toggle">
+            <input type="checkbox" id="invert-turn">
+            <span>Invert turning</span>
+        </label>
+
+        <hr>
+
+        <label class="toggle">
+            <input type="checkbox" id="auto-quality">
+            <span>Adapt video quality automatically</span>
+        </label>
+        <label class="slider">
+            <span>JPEG quality <em id="label-quality"></em></span>
+            <input type="range" id="quality" min="25" max="85" step="5">
+        </label>
+        <label class="slider">
+            <span>Max width <em id="label-max-width"></em></span>
+            <input type="range" id="max-width" min="320" max="1920" step="160">
+        </label>
+
+        <hr>
+
+        <strong class="section-title">Live topics</strong>
+        <div id="topic-table" class="topics"></div>
+    </aside>
+
+    <script src="/app.js"></script>
+</body>
+</html>
