@@ -36,7 +36,9 @@ function applyStatus(status) {
     }
     const publish = status.publish
     const transports = [publish.lcm && "lcm", publish.zenoh && "zenoh"].filter(Boolean).join(" + ")
-    element("publish-target").textContent = `${publish.topic} via ${transports || "nothing"}`
+    element("publish-target").textContent = transports
+        ? `driving ${publish.topic} over ${transports}`
+        : "not publishing"
 
     if (!state.settings || !state.editingSettings) {
         state.settings = status.settings
@@ -55,8 +57,8 @@ function renderValues() {
     }
     const linear = state.axes.forward * settings.linear_speed
     const angular = state.axes.turn * settings.angular_speed * (settings.invert_turn ? -1 : 1)
-    element("value-linear").textContent = `${linear.toFixed(2)} m/s`
-    element("value-angular").textContent = `${angular.toFixed(2)} rad/s`
+    element("value-linear").textContent = linear.toFixed(2)
+    element("value-angular").textContent = angular.toFixed(2)
 }
 
 function renderCameras(topics) {
@@ -275,7 +277,6 @@ function setupPad() {
 const SETTING_INPUTS = {
     "linear-speed": ["linear_speed", (value) => `${(+value).toFixed(2)} m/s`],
     "angular-speed": ["angular_speed", (value) => `${(+value).toFixed(1)} rad/s`],
-    "publish-hz": ["publish_hz", (value) => `${(+value).toFixed(0)} hz`],
     "deadman-ms": ["deadman_ms", (value) => `${(+value).toFixed(0)} ms`],
     quality: ["quality", (value) => `${value}`],
     "max-width": ["max_width", (value) => `${value} px`],
@@ -320,12 +321,13 @@ function setupSettings() {
             send({ type: "settings", [key]: event.target.checked })
         })
     }
-    element("settings-button").addEventListener("click", () => {
-        element("settings").hidden = false
-    })
-    element("settings-close").addEventListener("click", () => {
-        element("settings").hidden = true
-    })
+    const show = (open) => {
+        element("settings").hidden = !open
+        element("settings-scrim").hidden = !open
+    }
+    element("settings-button").addEventListener("click", () => show(true))
+    element("settings-close").addEventListener("click", () => show(false))
+    element("settings-scrim").addEventListener("click", () => show(false))
 }
 
 function startCommandLoop() {

@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
-    <meta name="theme-color" content="#0d1117">
+    <meta name="theme-color" content="#000000">
     <title>web_ctrl</title>
     <link rel="stylesheet" href="/style.css">
     <link rel="icon" href="data:,">
@@ -14,91 +14,97 @@
             <span id="link-dot" class="dot"></span>
             <strong>web_ctrl</strong>
         </div>
-        <div id="publish-target" class="muted">connecting</div>
-        <button id="settings-button" class="ghost" aria-label="settings">settings</button>
+        <div id="publish-target" class="pill">connecting</div>
+        <button id="settings-button" class="ghost" aria-label="Settings">Settings</button>
     </header>
 
     <main>
         <section id="streams" class="streams">
-            <p id="streams-empty" class="empty">Waiting for image topics&hellip;</p>
+            <p id="streams-empty" class="empty">Looking for camera topics&hellip;</p>
         </section>
-
-        <nav id="camera-picker" class="picker" aria-label="camera topics"></nav>
+        <nav id="camera-picker" class="picker" aria-label="Camera topics"></nav>
     </main>
 
     <section class="control">
-        <div class="pad-wrap">
-            <div id="pad" class="pad">
-                <div id="pad-knob" class="knob"></div>
-                <span class="pad-label">drag to drive</span>
-            </div>
+        <div id="pad" class="pad">
+            <div id="pad-knob" class="knob"></div>
         </div>
-        <div class="readout">
-            <div class="keys" aria-hidden="true">
-                <span data-key="w">W</span>
-                <div>
-                    <span data-key="a">A</span>
-                    <span data-key="s">S</span>
-                    <span data-key="d">D</span>
-                </div>
+
+        <dl class="readout">
+            <div>
+                <dt>Linear</dt>
+                <dd><span id="value-linear">0.00</span><small>m/s</small></dd>
             </div>
-            <dl>
-                <div><dt>linear</dt><dd id="value-linear">0.00 m/s</dd></div>
-                <div><dt>angular</dt><dd id="value-angular">0.00 rad/s</dd></div>
-            </dl>
-            <label class="toggle">
+            <div>
+                <dt>Angular</dt>
+                <dd><span id="value-angular">0.00</span><small>rad/s</small></dd>
+            </div>
+        </dl>
+
+        <div class="hints">
+            <div class="keys" aria-hidden="true">
+                <span data-key="q">Q</span>
+                <span data-key="w">W</span>
+                <span data-key="e">E</span>
+                <span data-key="a">A</span>
+                <span data-key="s">S</span>
+                <span data-key="d">D</span>
+            </div>
+            <p class="hint-text">W A S D drive &middot; Q E strafe &middot; Space stops</p>
+            <label class="switch">
                 <input type="checkbox" id="strafe-mode">
-                <span>sideways instead of turn</span>
+                <span>Stick strafes instead of turning</span>
             </label>
         </div>
     </section>
 
-    <aside id="settings" class="settings" hidden>
+    <div id="settings-scrim" class="scrim" hidden></div>
+    <aside id="settings" class="settings" hidden aria-label="Settings">
         <div class="settings-head">
-            <strong>Settings</strong>
-            <button id="settings-close" class="ghost">done</button>
+            <h2>Settings</h2>
+            <button id="settings-close" class="ghost">Done</button>
         </div>
 
-        <label class="slider">
-            <span>Linear speed <em id="label-linear-speed"></em></span>
-            <input type="range" id="linear-speed" min="0.05" max="1.5" step="0.05">
-        </label>
-        <label class="slider">
-            <span>Angular speed <em id="label-angular-speed"></em></span>
-            <input type="range" id="angular-speed" min="0.1" max="3" step="0.1">
-        </label>
-        <label class="slider">
-            <span>Publish rate <em id="label-publish-hz"></em></span>
-            <input type="range" id="publish-hz" min="5" max="60" step="5">
-        </label>
-        <label class="slider">
-            <span>Stop after silence <em id="label-deadman"></em></span>
-            <input type="range" id="deadman-ms" min="100" max="2000" step="50">
-        </label>
-        <label class="toggle">
-            <input type="checkbox" id="invert-turn">
-            <span>Invert turning</span>
-        </label>
+        <div class="group">
+            <p class="group-title">Driving</p>
+            <label class="row slider">
+                <span>Linear speed <em id="label-linear-speed"></em></span>
+                <input type="range" id="linear-speed" min="0.05" max="1.5" step="0.05">
+            </label>
+            <label class="row slider">
+                <span>Angular speed <em id="label-angular-speed"></em></span>
+                <input type="range" id="angular-speed" min="0.1" max="3" step="0.1">
+            </label>
+            <label class="row slider">
+                <span>Stop after silence <em id="label-deadman-ms"></em></span>
+                <input type="range" id="deadman-ms" min="100" max="2000" step="50">
+            </label>
+            <label class="row switch">
+                <input type="checkbox" id="invert-turn">
+                <span>Invert turning</span>
+            </label>
+        </div>
 
-        <hr>
+        <div class="group">
+            <p class="group-title">Video</p>
+            <label class="row switch">
+                <input type="checkbox" id="auto-quality">
+                <span>Adapt quality to keep up</span>
+            </label>
+            <label class="row slider">
+                <span>JPEG quality <em id="label-quality"></em></span>
+                <input type="range" id="quality" min="25" max="85" step="5">
+            </label>
+            <label class="row slider">
+                <span>Max width <em id="label-max-width"></em></span>
+                <input type="range" id="max-width" min="320" max="1920" step="160">
+            </label>
+        </div>
 
-        <label class="toggle">
-            <input type="checkbox" id="auto-quality">
-            <span>Adapt video quality automatically</span>
-        </label>
-        <label class="slider">
-            <span>JPEG quality <em id="label-quality"></em></span>
-            <input type="range" id="quality" min="25" max="85" step="5">
-        </label>
-        <label class="slider">
-            <span>Max width <em id="label-max-width"></em></span>
-            <input type="range" id="max-width" min="320" max="1920" step="160">
-        </label>
-
-        <hr>
-
-        <strong class="section-title">Live topics</strong>
-        <div id="topic-table" class="topics"></div>
+        <div class="group">
+            <p class="group-title">Live topics</p>
+            <div id="topic-table" class="topics"></div>
+        </div>
     </aside>
 
     <script src="/app.js"></script>
