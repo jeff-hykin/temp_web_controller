@@ -105,19 +105,25 @@ pub enum Incoming<'a> {
 ///
 /// `wants_payload` is consulted before a fragmented message is reassembled, so
 /// image topics nobody is watching cost one hash lookup instead of a 400 KB copy.
-pub fn run_receiver<S, W>(url: LcmUrl, sink: S, wants_payload: W) -> Result<()>
+/// `on_listening` fires once the group has actually been joined, which is the
+/// only point at which this process can hear anything.
+pub fn run_receiver<S, W, L>(url: LcmUrl, sink: S, wants_payload: W, on_listening: L) -> Result<()>
 where
     S: Fn(Incoming),
     W: Fn(&str) -> bool,
+    L: Fn(),
 {
     let socket = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))?;
     socket.set_reuse_address(true)?;
     #[cfg(unix)]
     socket.set_reuse_port(true)?;
     socket.bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, url.port).into())?;
-    socket.join_multicast_v4(&url.group, &Ipv4Addr::UNSPECIFIED)?;
+    socket
+        .join_multicast_v4(&url.group, &Ipv4Addr::UNSPECIFIED)
+        .with_context(|| format!("joining lcm multicast group {}", url.group))?;
     let _ = socket.set_recv_buffer_size(RECEIVE_BUFFER_BYTES);
     socket.set_read_timeout(Some(Duration::from_millis(200)))?;
+    on_listening();
 
     let mut buffer = [MaybeUninit::<u8>::uninit(); 65_536];
     let mut partials: HashMap<(SocketAddr, u32), PartialMessage> = HashMap::new();

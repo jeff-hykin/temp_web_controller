@@ -10,7 +10,7 @@ use axum::Router;
 use bytes::Bytes;
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -19,6 +19,9 @@ pub struct AppState {
     pub launcher: Arc<Launcher>,
     pub lcm_enabled: bool,
     pub zenoh_enabled: bool,
+    /// Set while the lcm receiver is down. Without this the thread could die at
+    /// boot and the UI would look merely idle rather than deaf.
+    pub lcm_receiver_error: Arc<Mutex<Option<String>>>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -95,6 +98,9 @@ fn status_payload(state: &AppState) -> serde_json::Value {
             "topic": state.hub.settings().publish_topic,
             "lcm": state.lcm_enabled,
             "zenoh": state.zenoh_enabled,
+        },
+        "receivers": {
+            "lcm_error": state.lcm_receiver_error.lock().unwrap().clone(),
         },
     })
 }

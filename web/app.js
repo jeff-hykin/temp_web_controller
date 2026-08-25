@@ -9,6 +9,7 @@ const state = {
     pad: { active: false, x: 0, y: 0 },
     strafeMode: false,
     topics: [],
+    lcmError: null,
 }
 
 let control = null
@@ -37,9 +38,17 @@ function applyStatus(status) {
     }
     const publish = status.publish
     const transports = [publish.lcm && "lcm", publish.zenoh && "zenoh"].filter(Boolean).join(" + ")
-    element("publish-target").textContent = transports
+    const target = element("publish-target")
+    target.textContent = transports
         ? `driving ${publish.topic} over ${transports}`
         : "not publishing"
+
+    const lcmError = status.receivers?.lcm_error
+    state.lcmError = lcmError
+    target.classList.toggle("bad", Boolean(lcmError))
+    if (lcmError) {
+        target.textContent += ` — not hearing lcm: ${lcmError}`
+    }
 
     if (!state.settings || !state.editingSettings) {
         state.settings = status.settings
@@ -633,7 +642,7 @@ function renderTf(view) {
         line.textContent = text
         return line
     }))
-    element("settings-badge").hidden = view.warnings.length === 0
+    element("settings-badge").hidden = view.warnings.length === 0 && !state.lcmError
 
     const summary = element("tf-summary")
     summary.classList.toggle("bad", view.warnings.length > 0)

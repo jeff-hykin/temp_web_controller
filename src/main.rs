@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use hub::{Hub, Settings, Transport};
 use std::path::{Path, PathBuf};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -153,7 +153,8 @@ async fn main() -> Result<()> {
 
     let lcm_url = lcm::parse_url(&args.lcm_url)?;
     let lcm_transport = Arc::new(lcm::LcmTransport::new(lcm_url).context("opening lcm socket")?);
-    spawn_lcm_receiver(Arc::clone(&hub), lcm_url);
+    let lcm_receiver_error = Arc::new(Mutex::new(Some("starting up".to_owned())));
+    spawn_lcm_receiver(Arc::clone(&hub), lcm_url, Arc::clone(&lcm_receiver_error));
 
     let zenoh_session = match zenoh_io::open().await {
         Ok(session) => Some(session),
@@ -179,6 +180,7 @@ async fn main() -> Result<()> {
         launcher: Arc::new(launcher::Launcher::new(launch_file)),
         lcm_enabled: lcm_publishing,
         zenoh_enabled: zenoh_publishing.is_some(),
+        lcm_receiver_error,
     };
 
     spawn_rate_ticker(Arc::clone(&hub));
@@ -206,25 +208,48 @@ fn describe(transport: TransportChoice) -> &'static str {
     }
 }
 
-fn spawn_lcm_receiver(hub: Arc<Hub>, url: lcm::LcmUrl) {
+/// Joining the multicast group fails with ENODEV until an interface carrying a
+/// multicast route exists, which at boot happens after `network-online.target`
+/// is already satisfied. Retrying is the only reliable fix; giving up left LCM
+/// dead for the whole life of the process.
+fn retry_delay(consecutive_failures: u32) -> Duration {
+    let seconds = 1u64 << consecutive_failures.min(5);
+    Duration::from_secs(seconds.min(30))
+}
+
+fn spawn_lcm_receiver(hub: Arc<Hub>, url: lcm::LcmUrl, status: Arc<Mutex<Option<String>>>) {
     std::thread::Builder::new()
         .name("lcm receive".to_owned())
         .spawn(move || {
-            let sink_hub = Arc::clone(&hub);
-            let result = lcm::run_receiver(
-                url,
-                |incoming| match incoming {
-                    lcm::Incoming::Message { channel, payload } => {
-                        sink_hub.on_lcm_message(channel, payload)
-                    }
-                    lcm::Incoming::Skipped { channel, bytes } => {
-                        sink_hub.record_skipped(Transport::Lcm, channel, bytes)
-                    }
-                },
-                |channel| hub.wants_payload(channel),
-            );
-            if let Err(error) = result {
-                eprintln!("lcm receiver stopped: {error}");
+            let mut consecutive_failures = 0;
+            loop {
+                let sink_hub = Arc::clone(&hub);
+                let started = std::time::Instant::now();
+                let listening_status = Arc::clone(&status);
+                let result = lcm::run_receiver(
+                    url,
+                    |incoming| match incoming {
+                        lcm::Incoming::Message { channel, payload } => {
+                            sink_hub.on_lcm_message(channel, payload)
+                        }
+                        lcm::Incoming::Skipped { channel, bytes } => {
+                            sink_hub.record_skipped(Transport::Lcm, channel, bytes)
+                        }
+                    },
+                    |channel| hub.wants_payload(channel),
+                    || *listening_status.lock().unwrap() = None,
+                );
+                if started.elapsed() > Duration::from_secs(60) {
+                    consecutive_failures = 0;
+                }
+                let delay = retry_delay(consecutive_failures);
+                if let Err(error) = result {
+                    let reason = format!("{error:#}");
+                    eprintln!("lcm receiver down, retrying in {}s: {reason}", delay.as_secs());
+                    *status.lock().unwrap() = Some(reason);
+                }
+                consecutive_failures += 1;
+                std::thread::sleep(delay);
             }
         })
         .expect("failed to spawn lcm thread");
@@ -291,4 +316,23 @@ fn local_address() -> IpAddr {
         })
         .map(|address| address.ip());
     probe.unwrap_or(IpAddr::from([127, 0, 0, 1]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_retry_is_immediate_enough_to_cover_the_boot_race() {
+        assert_eq!(retry_delay(0), Duration::from_secs(1));
+        assert_eq!(retry_delay(1), Duration::from_secs(2));
+        assert_eq!(retry_delay(2), Duration::from_secs(4));
+    }
+
+    #[test]
+    fn retries_back_off_to_a_capped_delay() {
+        assert_eq!(retry_delay(5), Duration::from_secs(30));
+        assert_eq!(retry_delay(50), Duration::from_secs(30));
+        assert_eq!(retry_delay(u32::MAX), Duration::from_secs(30));
+    }
 }
