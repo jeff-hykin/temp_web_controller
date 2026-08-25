@@ -197,6 +197,14 @@ enum Pixels {
     Rgb,
 }
 
+/// dimos's `JpegLcmTransport` sends an ordinary `sensor_msgs/Image` whose `data`
+/// is already a JFIF stream and whose `step` is 0. Those bytes go straight to the
+/// browser, which skips a decode and a re-encode per frame per viewer. The SOI
+/// check keeps a mislabelled payload from being served as a broken image.
+fn is_jpeg_payload(image: &RawImage) -> bool {
+    matches!(image.encoding.as_str(), "jpeg" | "jpg") && image.data.starts_with(&[0xFF, 0xD8])
+}
+
 fn kind_of(encoding: &str) -> Option<(Pixels, usize, bool)> {
     let (pixels, bytes_per_pixel, is_depth) = match encoding {
         "mono8" | "8UC1" => (Pixels::Gray, 1, false),
@@ -216,6 +224,13 @@ fn kind_of(encoding: &str) -> Option<(Pixels, usize, bool)> {
 /// Sampling is nearest neighbour: at the frame rates this streams, a cheap
 /// resample that keeps up beats a pretty one that forces frames to be dropped.
 pub fn encode(image: &RawImage, quality: u8, max_width: usize) -> Result<EncodedFrame> {
+    if is_jpeg_payload(image) {
+        return Ok(EncodedFrame {
+            jpeg: Bytes::from(image.data.clone()),
+            width: image.width,
+            height: image.height,
+        });
+    }
     let Some((pixels, bytes_per_pixel, is_depth)) = kind_of(&image.encoding) else {
         bail!("unsupported image encoding: {}", image.encoding);
     };
@@ -446,6 +461,43 @@ mod tests {
             encoding: "rgb8".to_owned(),
             data: (0..width * height * 3).map(|index| ((index * 7) % 251) as u8).collect(),
         }
+    }
+
+    /// Mirrors dimos's `JpegLcmTransport`: a plain Image whose data is a JFIF
+    /// stream and whose step is 0.
+    fn prejpeg_image(width: usize, height: usize) -> RawImage {
+        let source = colour_image(width, height);
+        let frame = encode(&source, 75, width).unwrap();
+        RawImage {
+            step: 0,
+            encoding: "jpeg".to_owned(),
+            data: frame.jpeg.to_vec(),
+            ..source
+        }
+    }
+
+    #[test]
+    fn already_jpeg_frames_are_passed_through_without_re_encoding() {
+        let image = prejpeg_image(32, 24);
+        let frame = encode(&image, 40, 8).unwrap();
+        assert_eq!(frame.jpeg.as_ref(), image.data.as_slice());
+        // Pass-through ignores quality and max_width, so the real dimensions
+        // must be reported or the browser scales the tile wrong.
+        assert_eq!((frame.width, frame.height), (32, 24));
+    }
+
+    #[test]
+    fn a_frame_labelled_jpeg_without_the_jfif_marker_is_rejected() {
+        let mut image = prejpeg_image(16, 16);
+        image.data[0] = 0x00;
+        assert!(encode(&image, 75, 800).is_err());
+    }
+
+    #[test]
+    fn recording_keeps_an_already_jpeg_frame_as_it_arrived() {
+        let image = prejpeg_image(16, 16);
+        assert!(compress(&image, ImageFormat::Png).is_none());
+        assert!(compress(&image, ImageFormat::Jpeg).is_none());
     }
 
     fn depths(image: &RawImage) -> Vec<u16> {
