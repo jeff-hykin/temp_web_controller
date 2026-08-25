@@ -178,7 +178,6 @@ pub struct Hub {
     streams: RwLock<HashMap<String, Arc<Stream>>>,
     settings: Mutex<Settings>,
     command: Mutex<(Command, Instant)>,
-    control_clients: AtomicUsize,
     tf: Mutex<HashMap<(String, String), TfEdgeRecord>>,
     recorder: Mutex<Option<Recorder>>,
     /// Held as an exclusion set rather than an inclusion set so a topic that
@@ -194,7 +193,6 @@ impl Hub {
             streams: RwLock::new(HashMap::new()),
             settings: Mutex::new(settings),
             command: Mutex::new((Command::default(), Instant::now())),
-            control_clients: AtomicUsize::new(0),
             tf: Mutex::new(HashMap::new()),
             recorder: Mutex::new(None),
             recording_excluded: RwLock::new(HashSet::new()),
@@ -257,17 +255,10 @@ impl Hub {
         )
     }
 
-    pub fn add_control_client(&self) {
-        self.control_clients.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub fn remove_control_client(&self) {
-        self.control_clients.fetch_sub(1, Ordering::Relaxed);
+    /// A browser that closed its socket cannot steer any more, and the last thing
+    /// it sent may well have been a drive command.
+    pub fn on_control_disconnect(&self) {
         self.set_command(Command::default());
-    }
-
-    pub fn has_control_clients(&self) -> bool {
-        self.control_clients.load(Ordering::Relaxed) > 0
     }
 
     pub fn wants_payload(&self, channel: &str) -> bool {

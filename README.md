@@ -32,7 +32,7 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
 --linear-speed <M_PER_S>          [default: 0.25]
 --angular-speed <RAD_PER_S>       [default: 0.5]
 --record-dir <DIR>                where mcap recordings are written [default: recordings]
---launch-file <PATH>              saved launcher commands [default: launch_commands.json]
+--launch-file <PATH>              saved launcher commands [default: ~/.dimos/temp_web_control.json]
 ```
 
 ## Controls
@@ -50,6 +50,10 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
 
 Commands expire after the deadman timeout (400 ms default), so a dropped connection stops the
 robot rather than latching the last command.
+
+Nothing is published while nobody is steering. The topic only carries traffic while a control
+is held, followed by a second of zeros so the stop is heard, and then goes quiet — otherwise a
+parked browser would drown out every other teleop source on the same topic.
 
 ## Transform tree
 
@@ -87,7 +91,11 @@ path, and a delete that needs a second click to confirm.
 The Launch button opens a panel that runs shell commands on the machine hosting the binary.
 A command is a name paired with a bash line; saving one adds a button that runs it. The last
 handful of stdout and stderr lines stream into the panel while it runs, and the exit code is
-shown in red if it crashes. Commands are saved to `--launch-file` so they survive a restart.
+shown in red if it crashes.
+
+Commands live on the robot, in `~/.dimos/temp_web_control.json`, not in the browser — one
+person can add a command and someone else can run it from their own phone. The output stream
+and running state are shared the same way, so everyone watching sees the same thing.
 
 Only one command runs at a time. Each gets its own process group, so Stop takes down the whole
 tree rather than just the shell that spawned it.

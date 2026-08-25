@@ -67,6 +67,14 @@ impl Launcher {
         })
     }
 
+    fn persist(&self, commands: &[SavedCommand]) -> Result<()> {
+        if let Some(parent) = self.file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.file, serde_json::to_string_pretty(commands)?)?;
+        Ok(())
+    }
+
     /// Puts a message in the same stream the launched command writes to, so a
     /// refused action is visible where the user is already looking.
     pub fn note(&self, line: String) {
@@ -86,14 +94,14 @@ impl Launcher {
                 command: command.to_owned(),
             }),
         }
-        std::fs::write(&self.file, serde_json::to_string_pretty(&*commands)?)?;
+        self.persist(&commands)?;
         Ok(())
     }
 
     pub fn delete_command(&self, name: &str) -> Result<()> {
         let mut commands = self.commands.lock().unwrap();
         commands.retain(|saved| saved.name != name);
-        std::fs::write(&self.file, serde_json::to_string_pretty(&*commands)?)?;
+        self.persist(&commands)?;
         Ok(())
     }
 
@@ -400,7 +408,10 @@ mod tests {
 
     #[test]
     fn saving_a_command_replaces_the_one_with_the_same_name() {
-        let file = std::env::temp_dir().join(format!("launch_{}.json", std::process::id()));
+        // Nested under a directory that does not exist yet, because the default
+        // lives in ~/.dimos and a fresh robot has no such folder.
+        let directory = std::env::temp_dir().join(format!("launch_{}", std::process::id()));
+        let file = directory.join("temp_web_control.json");
         let launcher = Launcher::new(file.clone());
         launcher.save_command("nav", "echo one").unwrap();
         launcher.save_command("nav", "echo two").unwrap();
@@ -413,6 +424,6 @@ mod tests {
 
         assert!(launcher.save_command("", "echo").is_err());
         assert!(launcher.save_command("nav", "  ").is_err());
-        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_dir_all(directory);
     }
 }

@@ -139,7 +139,6 @@ async fn control_socket(upgrade: WebSocketUpgrade, State(state): State<AppState>
 }
 
 async fn run_control_socket(mut socket: WebSocket, state: AppState) {
-    state.hub.add_control_client();
     let mut status_timer = tokio::time::interval(Duration::from_millis(500));
 
     loop {
@@ -204,7 +203,7 @@ async fn run_control_socket(mut socket: WebSocket, state: AppState) {
         }
     }
 
-    state.hub.remove_control_client();
+    state.hub.on_control_disconnect();
 }
 
 async fn stream_socket(

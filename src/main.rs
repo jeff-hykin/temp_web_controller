@@ -53,9 +53,18 @@ struct Args {
     #[arg(long, default_value = "recordings")]
     record_dir: PathBuf,
 
-    /// Where the launcher's saved commands are kept.
-    #[arg(long, default_value = "launch_commands.json")]
-    launch_file: PathBuf,
+    /// Where the launcher's saved commands are kept. Defaults to
+    /// `~/.dimos/temp_web_control.json` so every browser on the robot shares one
+    /// list rather than each keeping its own.
+    #[arg(long)]
+    launch_file: Option<PathBuf>,
+}
+
+fn default_launch_file() -> PathBuf {
+    match std::env::var_os("HOME") {
+        Some(home) => PathBuf::from(home).join(".dimos/temp_web_control.json"),
+        None => PathBuf::from("temp_web_control.json"),
+    }
 }
 
 #[tokio::main]
@@ -98,7 +107,9 @@ async fn main() -> Result<()> {
     let lcm_publishing = args.transport != TransportChoice::Zenoh;
     let state = web::AppState {
         hub: Arc::clone(&hub),
-        launcher: Arc::new(launcher::Launcher::new(args.launch_file.clone())),
+        launcher: Arc::new(launcher::Launcher::new(
+            args.launch_file.clone().unwrap_or_else(default_launch_file),
+        )),
         lcm_enabled: lcm_publishing,
         zenoh_enabled: zenoh_publishing.is_some(),
     };
@@ -171,20 +182,23 @@ async fn publish_commands(
     lcm_transport: Option<Arc<lcm::LcmTransport>>,
     zenoh_session: Option<zenoh::Session>,
 ) {
-    let mut idle_flush = 0;
+    let mut stop_flush = 0;
     loop {
         let settings = hub.settings();
         tokio::time::sleep(Duration::from_secs_f64(1.0 / settings.publish_hz)).await;
 
-        if hub.has_control_clients() {
-            idle_flush = settings.publish_hz as i32;
-        } else if idle_flush > 0 {
-            idle_flush -= 1;
+        let (linear_x, linear_y, angular_z) = hub.current_command();
+        // Publishing zeros forever would fight whatever else drives this topic, so
+        // the stream goes quiet when nobody is steering. The stop still has to be
+        // heard though, so a second of zeros follows the last real input.
+        if linear_x != 0.0 || linear_y != 0.0 || angular_z != 0.0 {
+            stop_flush = settings.publish_hz as i32;
+        } else if stop_flush > 0 {
+            stop_flush -= 1;
         } else {
             continue;
         }
 
-        let (linear_x, linear_y, angular_z) = hub.current_command();
         let payload = msgs::encode_twist([linear_x, linear_y, 0.0], [0.0, 0.0, angular_z]);
         let topic = &settings.publish_topic;
         if let Some(transport) = &lcm_transport {
