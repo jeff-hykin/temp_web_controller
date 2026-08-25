@@ -55,9 +55,6 @@ enum Surface {
 /// them take 32-bit float depth — so the caller keeps the raw frame instead of
 /// writing a degraded one.
 pub fn compress(image: &RawImage, format: ImageFormat) -> Option<CompressedImage> {
-    if format == ImageFormat::Raw {
-        return None;
-    }
     let surface = surface(image)?;
     let width = image.width as u32;
     let height = image.height as u32;
