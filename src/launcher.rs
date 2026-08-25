@@ -9,7 +9,9 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-const KEPT_LINES: usize = 14;
+/// Enough that a python traceback survives, since a stack dying from the phone is
+/// otherwise a truncated tail with the real error already scrolled off.
+const KEPT_LINES: usize = 40;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SavedCommand {

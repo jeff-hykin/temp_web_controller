@@ -1011,8 +1011,9 @@ input[type="range"] {
 .launch-output {
     margin: 0;
     padding: 0 14px 14px;
-    max-height: 190px;
+    max-height: 300px;
     overflow: auto;
+    overscroll-behavior: contain;
     font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--muted);
     white-space: pre-wrap;

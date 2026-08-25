@@ -85,9 +85,18 @@ function renderLauncher(launcher) {
     renderKillButton()
 
     const output = element("launch-output")
-    output.textContent = launcher.lines.length ? launcher.lines.join("\n") : "nothing launched yet"
+    const text = launcher.lines.length ? launcher.lines.join("\n") : "nothing launched yet"
     output.classList.toggle("failed", Boolean(failed))
-    output.scrollTop = output.scrollHeight
+    // Rewriting the text node drops any selection, and forcing the scroll every poll
+    // yanks the view back down while you are reading further up. So only follow the
+    // tail when already parked at the bottom, and only touch the DOM on a change.
+    if (output.textContent !== text) {
+        const atBottom = output.scrollHeight - output.scrollTop - output.clientHeight < 24
+        output.textContent = text
+        if (atBottom) {
+            output.scrollTop = output.scrollHeight
+        }
+    }
 
     const list = element("launch-list")
     if (!launcher.commands.length) {
