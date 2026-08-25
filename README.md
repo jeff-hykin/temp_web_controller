@@ -42,6 +42,7 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
   what you want for driving perfectly straight during a recording; the top row
   strafes left, drives forward, and strafes right
 - tap a camera chip to open or close that stream
+- the Record button turns red and shows the file size while a recording is running
 - the settings drawer adjusts speeds, deadman timeout, and image quality
 - the command topic can be renamed there while running, for robots that do not use
   `/tele_cmd_vel`; a name that cannot be used leaves the current one in place
@@ -65,9 +66,12 @@ not part of the video path.
 
 ## Recording
 
-Settings → Recording starts and stops an mcap file, written by a background thread in the
+The Record button starts and stops an mcap file, written by a background thread in the
 backend so the video path never waits on the disk. Every topic on the wire is recorded by
 default, including ones that appear mid-recording; unchecking a topic is what leaves it out.
+Unchecked topics are remembered in the browser's local storage and re-applied when the server
+restarts, so the same handful does not have to be unchecked every session. Only the exclusions
+are stored, so a topic seen for the first time is still recorded.
 
 Types the binary understands (`Image`, `CompressedImage`, `Twist`, `TFMessage`) are transcoded
 to ROS2 CDR with a schema, so the file opens in Foxglove directly. Anything else is stored as

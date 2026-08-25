@@ -20,6 +20,9 @@
 html, body {
     height: 100%;
     margin: 0;
+    /* Chrome for Android reads this off the root element, and a pull-to-refresh
+       mid-drive would reload the page and drop the connection to the robot. */
+    overscroll-behavior: none;
 }
 
 body {
@@ -212,10 +215,22 @@ main {
     backdrop-filter: saturate(180%) blur(20px);
 }
 
+.control-buttons {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+}
+
 .control button.ghost {
     flex: 0 0 auto;
     min-height: 44px;
     padding: 0 18px;
+}
+
+#record-open.recording {
+    border-color: rgba(255, 69, 58, 0.6);
+    background: rgba(255, 69, 58, 0.16);
+    color: var(--bad);
 }
 
 .pad {
@@ -259,23 +274,26 @@ main {
 .dpad-key {
     height: 46px;
     padding: 0;
-    border: 1px solid var(--hairline);
+    /* A hairline disappears on a phone screen held at arm's length, and a driving
+       control you cannot find is worse than one that breaks the flat look. */
+    border: 1px solid rgba(255, 255, 255, 0.3);
     border-radius: 12px;
-    background: var(--surface);
+    background: var(--surface-strong);
     color: var(--text);
     font-family: inherit;
     font-size: 18px;
     line-height: 1;
     touch-action: none;
     cursor: pointer;
-    transition: background 0.08s, color 0.08s;
+    transition: background 0.08s, color 0.08s, border-color 0.08s;
 }
 
 .dpad-key.stop {
     font-size: 10px;
     font-weight: 700;
     letter-spacing: 0.06em;
-    color: var(--faint);
+    border-color: rgba(255, 69, 58, 0.55);
+    color: var(--bad);
 }
 
 .dpad-key.down {
@@ -444,6 +462,9 @@ input[type="range"] {
 .group {
     display: flex;
     flex-direction: column;
+    /* Both drawers are fixed-height flex columns, which would otherwise shrink a
+       group and clip its rows in half rather than letting the drawer scroll. */
+    flex: 0 0 auto;
     background: var(--surface);
     border-radius: 14px;
     overflow: hidden;
@@ -783,12 +804,6 @@ input[type="range"] {
     font-size: 12px;
     color: var(--faint);
     overflow-wrap: anywhere;
-}
-
-/* The panel is a fixed-height flex column, which would otherwise shrink a group
-   and clip rows off the bottom instead of letting the panel scroll. */
-.panel .group {
-    flex: 0 0 auto;
 }
 
 /* `.group` has no horizontal padding of its own, so every direct child has to

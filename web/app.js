@@ -88,10 +88,9 @@ function renderRecording(recording, topics) {
     toggle.textContent = recording.active ? "Stop recording" : "Start recording"
     toggle.classList.toggle("on", recording.active)
 
-    const summary = recording.active
-        ? `${recording.messages} msgs · ${formatBytes(recording.bytes)}`
-        : "idle"
-    element("record-summary").textContent = summary
+    const open = element("record-open")
+    open.textContent = recording.active ? formatBytes(recording.bytes) : "Record"
+    open.classList.toggle("recording", recording.active)
     element("record-badge").hidden = !recording.active
 
     const dropped = recording.dropped > 0 ? ` · ${recording.dropped} dropped` : ""
@@ -106,15 +105,43 @@ function renderRecording(recording, topics) {
     }
 }
 
+/// Only the exclusions are remembered, never the inclusions, so a topic that
+/// shows up for the first time is still recorded by default.
+const EXCLUDED_KEY = "web_ctrl.excluded_topics"
+
+function excludedTopics() {
+    try {
+        return new Set(JSON.parse(localStorage.getItem(EXCLUDED_KEY)) ?? [])
+    } catch {
+        return new Set()
+    }
+}
+
 function renderRecordTopics(topics) {
+    const excluded = excludedTopics()
+    // The server forgets the exclusions on restart, so re-apply them whenever it
+    // reports a topic as recorded that this browser had turned off.
+    for (const topic of topics) {
+        if (topic.recorded && excluded.has(topic.topic)) {
+            send({ type: "record_topic", topic: topic.topic, recorded: false })
+        }
+    }
+
     const list = element("record-topics")
     list.replaceChildren(...topics.map((topic) => {
         const row = document.createElement("label")
         row.className = "record-topic"
         const box = document.createElement("input")
         box.type = "checkbox"
-        box.checked = topic.recorded
+        box.checked = topic.recorded && !excluded.has(topic.topic)
         box.addEventListener("change", () => {
+            const next = excludedTopics()
+            if (box.checked) {
+                next.delete(topic.topic)
+            } else {
+                next.add(topic.topic)
+            }
+            localStorage.setItem(EXCLUDED_KEY, JSON.stringify([...next]))
             send({ type: "record_topic", topic: topic.topic, recorded: box.checked })
         })
         const name = document.createElement("span")
