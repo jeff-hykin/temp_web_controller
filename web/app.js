@@ -62,6 +62,47 @@ function applyStatus(status) {
     renderValues()
 }
 
+const setText = (node, text) => {
+    if (node.textContent !== text) {
+        node.textContent = text
+    }
+}
+
+/// Rebuilding a list on every poll destroys the node under your finger, so a press
+/// in flight lands on nothing and local feedback ("starting…", a half-typed field)
+/// is wiped twice a second. Keep one node per key and only write what changed.
+/// `create(item)` returns a node carrying an `update(item)` method.
+function reconcile(container, items, keyOf, create) {
+    const existing = new Map()
+    for (const child of [...container.children]) {
+        if (child.dataset.rowKey === undefined) {
+            child.remove()
+        } else {
+            existing.set(child.dataset.rowKey, child)
+        }
+    }
+    let previous = null
+    for (const item of items) {
+        const key = keyOf(item)
+        let node = existing.get(key)
+        if (node) {
+            existing.delete(key)
+        } else {
+            node = create(item)
+            node.dataset.rowKey = key
+        }
+        node.update(item)
+        const wanted = previous ? previous.nextSibling : container.firstChild
+        if (node !== wanted) {
+            container.insertBefore(node, wanted)
+        }
+        previous = node
+    }
+    for (const node of existing.values()) {
+        node.remove()
+    }
+}
+
 /// The last launcher state the server reported, kept so a save or a delete can
 /// redraw the list immediately instead of looking ignored until the next poll.
 let launcherView = null
@@ -116,46 +157,54 @@ function renderLauncher(launcher) {
         }))
         return
     }
-    list.replaceChildren(...launcher.commands.map((saved) => {
+    reconcile(list, launcher.commands, (saved) => saved.name, () => {
         const row = document.createElement("div")
         row.className = "launch-row"
         const label = document.createElement("span")
-        label.textContent = saved.name
         // The command itself is worth showing, since a tooltip is unreachable on
         // the phone this is mostly used from.
         const detail = document.createElement("em")
-        detail.textContent = saved.command
         const run = document.createElement("button")
         run.className = "launch-run"
         run.textContent = "Launch"
-        run.disabled = Boolean(running)
+        let pressedAt = -Infinity
         run.addEventListener("click", () => {
-            send({ type: "launch_run", name: saved.name })
+            send({ type: "launch_run", name: row.dataset.rowKey })
             // Nothing comes back until the command produces its first line, so say
             // out loud that the press landed.
+            pressedAt = performance.now()
             run.classList.add("starting")
-            element("launch-state").textContent = `starting ${saved.name}…`
+            element("launch-state").textContent = `starting ${row.dataset.rowKey}…`
             element("launch-state").classList.remove("failed")
         })
         const stop = document.createElement("button")
         stop.className = "ghost small"
-        if (running?.name === saved.name) {
-            stop.textContent = "Stop"
-            stop.addEventListener("click", () => send({ type: "launch_stop" }))
-        } else {
-            stop.textContent = "Delete"
-            stop.classList.add("danger")
-            stop.addEventListener("click", () => {
-                send({ type: "launch_delete", name: saved.name })
-                renderLauncher({
-                    ...launcher,
-                    commands: launcher.commands.filter((other) => other.name !== saved.name),
-                })
+        stop.addEventListener("click", () => {
+            const name = row.dataset.rowKey
+            if (launcherView?.running?.name === name) {
+                send({ type: "launch_stop" })
+                return
+            }
+            send({ type: "launch_delete", name })
+            renderLauncher({
+                ...launcherView,
+                commands: launcherView.commands.filter((other) => other.name !== name),
             })
-        }
+        })
         row.append(label, detail, run, stop)
+        row.update = (saved) => {
+            setText(label, saved.name)
+            setText(detail, saved.command)
+            const live = launcherView?.running
+            run.disabled = Boolean(live)
+            // The node now outlives the press, so the flash needs its own expiry.
+            run.classList.toggle("starting", !live && performance.now() - pressedAt < 8000)
+            const isRunning = live?.name === saved.name
+            setText(stop, isRunning ? "Stop" : "Delete")
+            stop.classList.toggle("danger", !isRunning)
+        }
         return row
-    }))
+    })
 }
 
 const formatBytes = (bytes) => {
@@ -256,60 +305,70 @@ function renderRecordTopics(topics) {
         }
     }
 
-    const plain = topics.filter((topic) => !topic.is_rpc)
     const rpc = topics.filter((topic) => topic.is_rpc)
-    const row = (topic) => recordTopicRow(topic, wantsRecording(topic, overrides))
-    const rows = plain.map(row)
+    const rows = topics
+        .filter((topic) => !topic.is_rpc)
+        .map((topic) => ({ topic, checked: wantsRecording(topic, overrides) }))
     if (rpc.length > 0) {
-        rows.push(rpcHeaderRow(rpc, overrides))
+        rows.push({ rpc, on: rpc.filter((topic) => wantsRecording(topic, overrides)).length })
         if (rpcExpanded) {
-            rows.push(...rpc.map(row))
+            rows.push(...rpc.map((topic) => ({ topic, checked: wantsRecording(topic, overrides) })))
         }
     }
-    element("record-topics").replaceChildren(...rows)
+    const keyOf = (item) => item.rpc ? RPC_HEAD_KEY : item.topic.topic
+    const create = (item) => item.rpc ? rpcHeaderRow() : recordTopicRow()
+    reconcile(element("record-topics"), rows, keyOf, create)
 }
 
-function recordTopicRow(topic, checked) {
+/// A sentinel rather than a topic name, since the header is not a topic and no
+/// topic may collide with it.
+const RPC_HEAD_KEY = " rpc-head"
+
+function recordTopicRow() {
     const row = document.createElement("label")
     row.className = "record-topic"
     const box = document.createElement("input")
     box.type = "checkbox"
-    box.checked = checked
-    box.addEventListener("change", () => setTopicRecorded([topic], box.checked))
+    box.addEventListener("change", () => setTopicRecorded([row.topic], box.checked))
     const name = document.createElement("span")
-    name.textContent = topic.topic
     const type = document.createElement("em")
-    type.textContent = topic.msg_type ?? "?"
     row.append(box, name, type)
+    row.update = (item) => {
+        row.topic = item.topic
+        setText(name, item.topic.topic)
+        setText(type, item.topic.msg_type ?? "?")
+        box.checked = item.checked
+    }
     return row
 }
 
-function rpcHeaderRow(rpc, overrides) {
-    const on = rpc.filter((topic) => wantsRecording(topic, overrides)).length
+function rpcHeaderRow() {
+    const row = document.createElement("div")
+    row.className = "record-topic rpc-head"
 
     const box = document.createElement("input")
     box.type = "checkbox"
-    box.checked = on === rpc.length
-    box.indeterminate = on > 0 && on < rpc.length
-    box.addEventListener("change", () => setTopicRecorded(rpc, box.checked))
+    box.addEventListener("change", () => setTopicRecorded(row.rpc, box.checked))
 
     const name = document.createElement("span")
-    name.textContent = `RPC topics (${on}/${rpc.length})`
-
     const label = document.createElement("label")
     label.append(box, name)
 
     const expand = document.createElement("button")
     expand.className = "ghost small"
-    expand.textContent = rpcExpanded ? "Hide" : "Show"
     expand.addEventListener("click", () => {
         rpcExpanded = !rpcExpanded
         renderRecordTopics(state.topics)
     })
 
-    const row = document.createElement("div")
-    row.className = "record-topic rpc-head"
     row.append(label, expand)
+    row.update = (item) => {
+        row.rpc = item.rpc
+        setText(name, `RPC topics (${item.on}/${item.rpc.length})`)
+        box.checked = item.on === item.rpc.length
+        box.indeterminate = item.on > 0 && item.on < item.rpc.length
+        setText(expand, rpcExpanded ? "Hide" : "Show")
+    }
     return row
 }
 
@@ -414,9 +473,15 @@ function renderCameras(topics) {
             chip.className = "chip"
             chip.dataset.topic = topic.topic
             chip.addEventListener("click", () => toggleStream(topic.topic))
+            // The rate lives in its own fixed-width span: written inline, every
+            // 9→10 hz tick resized the chip and shoved its neighbours sideways.
+            chip.append(
+                Object.assign(document.createElement("span"), { textContent: `${topic.topic} · ` }),
+                Object.assign(document.createElement("span"), { className: "hz" }),
+            )
             picker.append(chip)
         }
-        chip.textContent = `${topic.topic} · ${topic.rate.toFixed(0)}hz`
+        setText(chip.lastChild, `${topic.rate.toFixed(0)}hz`)
         chip.classList.toggle("on", state.watching.has(topic.topic))
     }
     if (images.length && state.watching.size === 0) {
@@ -426,20 +491,23 @@ function renderCameras(topics) {
 }
 
 function renderTopics(topics) {
-    const table = element("topic-table")
-    table.replaceChildren(...topics.map((topic) => {
+    reconcile(element("topic-table"), topics, (topic) => topic.topic, () => {
         const row = document.createElement("div")
-        row.className = topic.seconds_since_seen > 5 ? "topic-row stale" : "topic-row"
+        row.className = "topic-row"
         const name = document.createElement("span")
-        name.textContent = topic.topic
         const type = document.createElement("span")
         type.className = "type"
-        type.textContent = topic.msg_type ?? "?"
         const rate = document.createElement("span")
-        rate.textContent = `${topic.rate.toFixed(0)} hz`
+        rate.className = "rate"
         row.append(name, type, rate)
+        row.update = (topic) => {
+            row.classList.toggle("stale", topic.seconds_since_seen > 5)
+            setText(name, topic.topic)
+            setText(type, topic.msg_type ?? "?")
+            setText(rate, `${topic.rate.toFixed(0)} hz`)
+        }
         return row
-    }))
+    })
 }
 
 function renderTileStats(streams) {

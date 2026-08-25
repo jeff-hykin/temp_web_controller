@@ -204,6 +204,14 @@ main {
     transform: scale(0.96);
 }
 
+/* Reserved width so a rate crossing a digit boundary cannot resize the chip and
+   slide every chip after it. */
+.chip .hz {
+    display: inline-block;
+    min-width: 4.5ch;
+    text-align: right;
+}
+
 .chip.on {
     background: var(--accent);
     color: #fff;
@@ -549,10 +557,17 @@ input[type="range"] {
 
 .topic-row {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    /* Fixed last column: an `auto` rate column re-measured on every poll, so the
+       type text beside it twitched left and right as the digits changed. */
+    grid-template-columns: 1fr auto 6ch;
     gap: 12px;
     padding: 8px 14px;
     border-top: 1px solid var(--hairline);
+}
+
+.topic-row .rate {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
 }
 
 .topic-row span:first-child {
