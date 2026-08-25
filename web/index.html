@@ -70,6 +70,7 @@
         </div>
 
         <div class="control-buttons">
+            <button id="launch-open" class="ghost" aria-label="Launcher">Launch</button>
             <button id="record-open" class="ghost" aria-label="Recording">Record</button>
             <button id="settings-button" class="ghost" aria-label="Settings">Settings<span id="settings-badge" class="badge" hidden></span></button>
         </div>
@@ -168,6 +169,43 @@
         <div class="group">
             <p class="group-title">Saved recordings</p>
             <div id="record-files" class="record-files"></div>
+        </div>
+    </aside>
+
+    <div id="launch-scrim" class="scrim" hidden></div>
+    <aside id="launch-panel" class="panel" hidden aria-label="Launcher">
+        <div class="settings-head">
+            <h2>Launcher</h2>
+            <button id="launch-close" class="ghost">Done</button>
+        </div>
+
+        <div class="record-bar">
+            <button id="launch-kill" class="record-button">Kill blueprint</button>
+            <span id="launch-state" class="record-stats">idle</span>
+        </div>
+
+        <div class="group">
+            <p class="group-title">Saved commands</p>
+            <div id="launch-list" class="record-topics"></div>
+            <p class="hint-text">Tap a name to run it. Only one runs at a time.</p>
+        </div>
+
+        <div class="group">
+            <p class="group-title">Add a command</p>
+            <label class="row text">
+                <span>Name</span>
+                <input type="text" id="launch-name" placeholder="alfred nav" spellcheck="false" autocapitalize="off" autocomplete="off">
+            </label>
+            <label class="row text">
+                <span>Command</span>
+                <input type="text" id="launch-command" placeholder="cd ~/dimos &amp;&amp; .venv/bin/python ..." spellcheck="false" autocapitalize="off" autocomplete="off">
+            </label>
+            <button id="launch-save" class="row link"><span>Save</span></button>
+        </div>
+
+        <div class="group">
+            <p class="group-title">Output</p>
+            <pre id="launch-output" class="launch-output">nothing launched yet</pre>
         </div>
     </aside>
 

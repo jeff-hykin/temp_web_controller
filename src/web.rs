@@ -1,4 +1,5 @@
 use crate::hub::{Command, Hub, SettingsPatch};
+use crate::launcher::Launcher;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
 use axum::http::header;
@@ -15,6 +16,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct AppState {
     pub hub: Arc<Hub>,
+    pub launcher: Arc<Launcher>,
     pub lcm_enabled: bool,
     pub zenoh_enabled: bool,
 }
@@ -88,6 +90,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "settings": state.hub.settings(),
         "streams": state.hub.stream_stats(),
         "recording": state.hub.recording_status(),
+        "launcher": state.launcher.view(),
         "publish": {
             "topic": state.hub.settings().publish_topic,
             "lcm": state.lcm_enabled,
@@ -116,6 +119,18 @@ enum ClientMessage {
     RecordTopic {
         topic: String,
         recorded: bool,
+    },
+    LaunchRun {
+        name: String,
+    },
+    LaunchStop,
+    LaunchKill,
+    LaunchSave {
+        name: String,
+        command: String,
+    },
+    LaunchDelete {
+        name: String,
     },
 }
 
@@ -155,6 +170,27 @@ async fn run_control_socket(mut socket: WebSocket, state: AppState) {
                     }
                     Ok(ClientMessage::RecordTopic { topic, recorded }) => {
                         state.hub.set_topic_recorded(&topic, recorded);
+                    }
+                    Ok(ClientMessage::LaunchRun { name }) => {
+                        if let Err(error) = state.launcher.run(&name) {
+                            state.launcher.note(error.to_string());
+                        }
+                    }
+                    Ok(ClientMessage::LaunchStop) => {
+                        if let Err(error) = state.launcher.stop() {
+                            state.launcher.note(error.to_string());
+                        }
+                    }
+                    Ok(ClientMessage::LaunchKill) => state.launcher.kill_blueprint(),
+                    Ok(ClientMessage::LaunchSave { name, command }) => {
+                        if let Err(error) = state.launcher.save_command(&name, &command) {
+                            state.launcher.note(error.to_string());
+                        }
+                    }
+                    Ok(ClientMessage::LaunchDelete { name }) => {
+                        if let Err(error) = state.launcher.delete_command(&name) {
+                            state.launcher.note(error.to_string());
+                        }
                     }
                     Err(error) => eprintln!("ignoring malformed control message: {error}"),
                 }

@@ -48,7 +48,59 @@ function applyStatus(status) {
     renderTopics(status.topics)
     renderTileStats(status.streams)
     renderRecording(status.recording, status.topics)
+    renderLauncher(status.launcher)
     renderValues()
+}
+
+function renderLauncher(launcher) {
+    if (!launcher) {
+        return
+    }
+    const running = launcher.running
+    const failed = !running && launcher.finished && launcher.finished.code !== 0
+    element("launch-state").textContent = running
+        ? `${running.name} · ${running.seconds.toFixed(0)}s`
+        : failed
+            ? `${launcher.finished.name} ${launcher.finished.code === null ? "was killed" : `failed (${launcher.finished.code})`}`
+            : "idle"
+    element("launch-state").classList.toggle("failed", Boolean(failed))
+    element("launch-open").classList.toggle("running", Boolean(running))
+
+    const output = element("launch-output")
+    output.textContent = launcher.lines.length ? launcher.lines.join("\n") : "nothing launched yet"
+    output.classList.toggle("failed", Boolean(failed))
+    output.scrollTop = output.scrollHeight
+
+    const list = element("launch-list")
+    if (!launcher.commands.length) {
+        list.replaceChildren(Object.assign(document.createElement("p"), {
+            className: "hint-text",
+            textContent: "no saved commands yet",
+        }))
+        return
+    }
+    list.replaceChildren(...launcher.commands.map((saved) => {
+        const row = document.createElement("div")
+        row.className = "launch-row"
+        const run = document.createElement("button")
+        run.className = "launch-run"
+        run.textContent = saved.name
+        run.title = saved.command
+        run.disabled = Boolean(running)
+        run.addEventListener("click", () => send({ type: "launch_run", name: saved.name }))
+        const stop = document.createElement("button")
+        stop.className = "ghost small"
+        if (running?.name === saved.name) {
+            stop.textContent = "Stop"
+            stop.addEventListener("click", () => send({ type: "launch_stop" }))
+        } else {
+            stop.textContent = "Delete"
+            stop.classList.add("danger")
+            stop.addEventListener("click", () => send({ type: "launch_delete", name: saved.name }))
+        }
+        row.append(run, stop)
+        return row
+    }))
 }
 
 const formatBytes = (bytes) => {
@@ -779,6 +831,23 @@ function setupSettings() {
 
     element("record-toggle").addEventListener("click", () => {
         send({ type: state.recording?.active ? "stop_record" : "record" })
+    })
+
+    const showLaunch = (open) => {
+        element("launch-panel").hidden = !open
+        element("launch-scrim").hidden = !open
+    }
+    element("launch-open").addEventListener("click", () => showLaunch(true))
+    element("launch-close").addEventListener("click", () => showLaunch(false))
+    element("launch-scrim").addEventListener("click", () => showLaunch(false))
+
+    element("launch-kill").addEventListener("click", () => send({ type: "launch_kill" }))
+    element("launch-save").addEventListener("click", () => {
+        const name = element("launch-name")
+        const command = element("launch-command")
+        send({ type: "launch_save", name: name.value, command: command.value })
+        name.value = ""
+        command.value = ""
     })
 }
 

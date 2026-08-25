@@ -32,6 +32,7 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
 --linear-speed <M_PER_S>          [default: 0.25]
 --angular-speed <RAD_PER_S>       [default: 0.5]
 --record-dir <DIR>                where mcap recordings are written [default: recordings]
+--launch-file <PATH>              saved launcher commands [default: launch_commands.json]
 ```
 
 ## Controls
@@ -80,6 +81,25 @@ silently incomplete.
 
 The panel also lists finished files with their size and age, a button that copies the absolute
 path, and a delete that needs a second click to confirm.
+
+## Launcher
+
+The Launch button opens a panel that runs shell commands on the machine hosting the binary.
+A command is a name paired with a bash line; saving one adds a button that runs it. The last
+handful of stdout and stderr lines stream into the panel while it runs, and the exit code is
+shown in red if it crashes. Commands are saved to `--launch-file` so they survive a restart.
+
+Only one command runs at a time. Each gets its own process group, so Stop takes down the whole
+tree rather than just the shell that spawned it.
+
+Kill blueprint is the `kd` script inlined: it kills every dimos process it can find (each clone's
+venv, native modules under `result/bin` and `rust/target/release`, viewers, simulators, ROS),
+frees the ports dimos uses, and removes dimos docker containers. It deliberately skips `web_ctrl`
+and `claude` so it cannot kill the server serving the page.
+
+**This is an unauthenticated remote shell.** The server binds `0.0.0.0` with no auth, so anyone
+who can reach the port can run commands as the user running the binary. Use `--bind 127.0.0.1`
+or a trusted network.
 
 ## Develop
 

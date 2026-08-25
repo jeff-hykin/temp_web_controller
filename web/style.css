@@ -888,3 +888,49 @@ input[type="range"] {
 .ghost.small.danger {
     color: var(--bad);
 }
+
+.launch-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.launch-run {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--hairline);
+    border-radius: 12px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+.launch-run:disabled {
+    color: var(--faint);
+}
+
+#launch-open.running {
+    border-color: rgba(50, 215, 75, 0.6);
+    background: rgba(50, 215, 75, 0.16);
+    color: var(--good);
+}
+
+.launch-output {
+    margin: 0;
+    padding: 0 14px 14px;
+    max-height: 190px;
+    overflow: auto;
+    font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: var(--muted);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.launch-output.failed,
+.record-stats.failed {
+    color: var(--bad);
+}

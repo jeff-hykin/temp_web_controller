@@ -1,6 +1,7 @@
 mod cdr;
 mod hub;
 mod image;
+mod launcher;
 mod lcm;
 mod msgs;
 mod record;
@@ -51,6 +52,10 @@ struct Args {
     /// Where mcap recordings are written and listed from.
     #[arg(long, default_value = "recordings")]
     record_dir: PathBuf,
+
+    /// Where the launcher's saved commands are kept.
+    #[arg(long, default_value = "launch_commands.json")]
+    launch_file: PathBuf,
 }
 
 #[tokio::main]
@@ -93,6 +98,7 @@ async fn main() -> Result<()> {
     let lcm_publishing = args.transport != TransportChoice::Zenoh;
     let state = web::AppState {
         hub: Arc::clone(&hub),
+        launcher: Arc::new(launcher::Launcher::new(args.launch_file.clone())),
         lcm_enabled: lcm_publishing,
         zenoh_enabled: zenoh_publishing.is_some(),
     };
