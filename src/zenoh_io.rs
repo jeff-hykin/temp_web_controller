@@ -1,7 +1,7 @@
 use crate::hub::Hub;
 use anyhow::{anyhow, Result};
 use std::sync::Arc;
-use zenoh::pubsub::{Publisher, Subscriber};
+use zenoh::pubsub::Subscriber;
 use zenoh::Session;
 
 pub async fn open() -> Result<Session> {
@@ -25,9 +25,11 @@ pub async fn subscribe_all(session: &Session, hub: Arc<Hub>) -> Result<Subscribe
     Ok(subscriber)
 }
 
-pub async fn declare_publisher(session: &Session, key_expr: String) -> Result<Publisher<'static>> {
+/// Published per message rather than through a declared publisher, because the
+/// command topic can be renamed from the settings drawer while running.
+pub async fn put(session: &Session, key_expr: String, payload: Vec<u8>) -> Result<()> {
     session
-        .declare_publisher(key_expr)
+        .put(key_expr, payload)
         .await
         .map_err(|error| anyhow!("{error}"))
 }

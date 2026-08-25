@@ -27,6 +27,7 @@ pub enum Transport {
 
 #[derive(Clone, Serialize)]
 pub struct Settings {
+    pub publish_topic: String,
     pub linear_speed: f64,
     pub angular_speed: f64,
     pub publish_hz: f64,
@@ -40,6 +41,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Settings {
+            publish_topic: "/tele_cmd_vel".to_owned(),
             linear_speed: 0.25,
             angular_speed: 0.5,
             publish_hz: 20.0,
@@ -54,6 +56,7 @@ impl Default for Settings {
 
 #[derive(Deserialize)]
 pub struct SettingsPatch {
+    pub publish_topic: Option<String>,
     pub linear_speed: Option<f64>,
     pub angular_speed: Option<f64>,
     pub publish_hz: Option<f64>,
@@ -205,6 +208,9 @@ impl Hub {
 
     pub fn apply_settings(&self, patch: SettingsPatch) -> Settings {
         let mut settings = self.settings.lock().unwrap();
+        if let Some(value) = patch.publish_topic.as_deref().and_then(command_topic) {
+            settings.publish_topic = value;
+        }
         if let Some(value) = patch.linear_speed {
             settings.linear_speed = value.clamp(0.0, 3.0);
         }
@@ -740,6 +746,18 @@ pub fn normalize(topic: &str) -> String {
     topic.trim_start_matches('/').to_owned()
 }
 
+/// Cleans up a topic name typed into the settings drawer. `None` means the name
+/// is unusable and the current one should be kept, since a robot that quietly
+/// stops receiving commands is worse than one that ignores a typo. `#` is
+/// refused because it is the separator in an LCM channel name.
+pub fn command_topic(name: &str) -> Option<String> {
+    let trimmed = normalize(name.trim());
+    if trimmed.is_empty() || trimmed.contains('#') || trimmed.contains(char::is_whitespace) {
+        return None;
+    }
+    Some(format!("/{trimmed}"))
+}
+
 pub fn parse_lcm_channel(channel: &str) -> (String, Option<String>) {
     match channel.rsplit_once('#') {
         Some((topic, msg_type)) => (normalize(topic), Some(msg_type.to_owned())),
@@ -788,6 +806,42 @@ mod tests {
         let (from_lcm, _) = parse_lcm_channel("/image#sensor_msgs.Image");
         let (from_zenoh, _) = parse_zenoh_key("image/sensor_msgs.Image");
         assert_eq!(from_lcm, from_zenoh);
+    }
+
+    #[test]
+    fn a_renamed_command_topic_gets_a_leading_slash_and_a_bad_one_is_refused() {
+        assert_eq!(command_topic("cmd_vel").as_deref(), Some("/cmd_vel"));
+        assert_eq!(command_topic("  /cmd_vel ").as_deref(), Some("/cmd_vel"));
+        assert_eq!(command_topic(""), None);
+        assert_eq!(command_topic("cmd vel"), None);
+        assert_eq!(command_topic("cmd_vel#geometry_msgs.Twist"), None);
+
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        hub.apply_settings(SettingsPatch {
+            publish_topic: Some("alfred/cmd_vel".to_owned()),
+            ..empty_patch()
+        });
+        assert_eq!(hub.settings().publish_topic, "/alfred/cmd_vel");
+
+        hub.apply_settings(SettingsPatch {
+            publish_topic: Some(String::new()),
+            ..empty_patch()
+        });
+        assert_eq!(hub.settings().publish_topic, "/alfred/cmd_vel");
+    }
+
+    fn empty_patch() -> SettingsPatch {
+        SettingsPatch {
+            publish_topic: None,
+            linear_speed: None,
+            angular_speed: None,
+            publish_hz: None,
+            deadman_ms: None,
+            invert_turn: None,
+            auto_quality: None,
+            quality: None,
+            max_width: None,
+        }
     }
 
     #[test]

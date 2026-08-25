@@ -675,6 +675,10 @@ const SETTING_TOGGLES = {
 }
 
 function renderSettings(settings) {
+    const topic = element("publish-topic")
+    if (document.activeElement !== topic) {
+        topic.value = settings.publish_topic
+    }
     for (const [id, [key, format]] of Object.entries(SETTING_INPUTS)) {
         const input = element(id)
         if (document.activeElement !== input) {
@@ -689,6 +693,17 @@ function renderSettings(settings) {
 }
 
 function setupSettings() {
+    // Sent on commit rather than per keystroke, so a half-typed name never
+    // becomes the topic the robot is being driven on.
+    const topicInput = element("publish-topic")
+    topicInput.addEventListener("change", (event) => {
+        send({ type: "settings", publish_topic: event.target.value })
+    })
+    topicInput.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+            event.target.blur()
+        }
+    })
     for (const [id, [key]] of Object.entries(SETTING_INPUTS)) {
         element(id).addEventListener("input", (event) => {
             const value = Number(event.target.value)

@@ -59,6 +59,8 @@ async fn main() -> Result<()> {
     let record_dir = std::fs::canonicalize(&args.record_dir).unwrap_or(args.record_dir.clone());
     let hub = Hub::new(
         Settings {
+            publish_topic: hub::command_topic(&args.topic)
+                .with_context(|| format!("{} is not a usable topic name", args.topic))?,
             linear_speed: args.linear_speed,
             angular_speed: args.angular_speed,
             ..Settings::default()
@@ -77,35 +79,29 @@ async fn main() -> Result<()> {
             None
         }
     };
-    let mut zenoh_publisher = None;
     if let Some(session) = &zenoh_session {
         match zenoh_io::subscribe_all(session, Arc::clone(&hub)).await {
             Ok(subscriber) => std::mem::forget(subscriber),
             Err(error) => eprintln!("zenoh discovery subscription failed: {error}"),
         }
-        if args.transport != TransportChoice::Lcm {
-            let key_expr = zenoh_io::key_expr_for(&args.topic, msgs::TWIST_TYPE);
-            match zenoh_io::declare_publisher(session, key_expr).await {
-                Ok(publisher) => zenoh_publisher = Some(publisher),
-                Err(error) => eprintln!("zenoh publisher failed: {error}"),
-            }
-        }
     }
+    let zenoh_publishing = match args.transport {
+        TransportChoice::Lcm => None,
+        _ => zenoh_session.clone(),
+    };
 
     let lcm_publishing = args.transport != TransportChoice::Zenoh;
     let state = web::AppState {
         hub: Arc::clone(&hub),
-        publish_topic: args.topic.clone(),
         lcm_enabled: lcm_publishing,
-        zenoh_enabled: zenoh_publisher.is_some(),
+        zenoh_enabled: zenoh_publishing.is_some(),
     };
 
     spawn_rate_ticker(Arc::clone(&hub));
     tokio::spawn(publish_commands(
         Arc::clone(&hub),
-        format!("{}#{}", args.topic, msgs::TWIST_TYPE),
         lcm_publishing.then(|| Arc::clone(&lcm_transport)),
-        zenoh_publisher,
+        zenoh_publishing,
     ));
 
     let address = SocketAddr::new(args.bind, args.port);
@@ -166,9 +162,8 @@ fn spawn_rate_ticker(hub: Arc<Hub>) {
 /// zeros for a moment after it leaves so the robot cannot inherit a stale command.
 async fn publish_commands(
     hub: Arc<Hub>,
-    lcm_channel: String,
     lcm_transport: Option<Arc<lcm::LcmTransport>>,
-    zenoh_publisher: Option<zenoh::pubsub::Publisher<'static>>,
+    zenoh_session: Option<zenoh::Session>,
 ) {
     let mut idle_flush = 0;
     loop {
@@ -185,13 +180,16 @@ async fn publish_commands(
 
         let (linear_x, linear_y, angular_z) = hub.current_command();
         let payload = msgs::encode_twist([linear_x, linear_y, 0.0], [0.0, 0.0, angular_z]);
+        let topic = &settings.publish_topic;
         if let Some(transport) = &lcm_transport {
-            if let Err(error) = transport.publish(&lcm_channel, &payload) {
+            let channel = format!("{topic}#{}", msgs::TWIST_TYPE);
+            if let Err(error) = transport.publish(&channel, &payload) {
                 eprintln!("lcm publish failed: {error}");
             }
         }
-        if let Some(publisher) = &zenoh_publisher {
-            if let Err(error) = publisher.put(payload).await {
+        if let Some(session) = &zenoh_session {
+            let key_expr = zenoh_io::key_expr_for(topic, msgs::TWIST_TYPE);
+            if let Err(error) = zenoh_io::put(session, key_expr, payload).await {
                 eprintln!("zenoh publish failed: {error}");
             }
         }

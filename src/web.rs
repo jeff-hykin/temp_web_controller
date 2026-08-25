@@ -15,7 +15,6 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct AppState {
     pub hub: Arc<Hub>,
-    pub publish_topic: String,
     pub lcm_enabled: bool,
     pub zenoh_enabled: bool,
 }
@@ -90,7 +89,7 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "streams": state.hub.stream_stats(),
         "recording": state.hub.recording_status(),
         "publish": {
-            "topic": state.publish_topic,
+            "topic": state.hub.settings().publish_topic,
             "lcm": state.lcm_enabled,
             "zenoh": state.zenoh_enabled,
         },

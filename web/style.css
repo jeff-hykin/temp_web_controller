@@ -477,6 +477,25 @@ input[type="range"] {
     justify-content: space-between;
 }
 
+.row.text {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.row.text input {
+    flex: 1;
+    min-width: 0;
+    padding: 7px 10px;
+    border: 1px solid var(--hairline);
+    border-radius: 9px;
+    background: var(--surface);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    text-align: right;
+}
+
 .slider em {
     float: right;
     color: var(--text);

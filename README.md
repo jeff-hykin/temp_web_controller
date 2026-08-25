@@ -43,6 +43,8 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
   strafes left, drives forward, and strafes right
 - tap a camera chip to open or close that stream
 - the settings drawer adjusts speeds, deadman timeout, and image quality
+- the command topic can be renamed there while running, for robots that do not use
+  `/tele_cmd_vel`; a name that cannot be used leaves the current one in place
 
 Commands expire after the deadman timeout (400 ms default), so a dropped connection stops the
 robot rather than latching the last command.
