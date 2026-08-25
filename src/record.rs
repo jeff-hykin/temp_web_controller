@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use mcap::{WriteOptions, Writer};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Deep enough to ride out a disk hiccup, shallow enough that we shed frames
 /// instead of growing an unbounded backlog.
@@ -35,6 +35,28 @@ struct Counters {
     messages: AtomicU64,
     bytes: AtomicU64,
     dropped: AtomicU64,
+}
+
+/// Chunk compression for the mcap file. `None` is the safest under a hard kill
+/// (the file stays readable up to the last message) but depth frames make a
+/// recording enormous, so lz4 is the default trade.
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Compression {
+    None,
+    #[default]
+    Lz4,
+    Zstd,
+}
+
+impl Compression {
+    fn to_mcap(self) -> Option<mcap::Compression> {
+        match self {
+            Compression::None => None,
+            Compression::Lz4 => Some(mcap::Compression::Lz4),
+            Compression::Zstd => Some(mcap::Compression::Zstd),
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -56,16 +78,14 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn start(path: &Path) -> Result<Self> {
+    pub fn start(path: &Path, compression: Compression) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
         }
         let file = File::create(path).with_context(|| format!("could not create {}", path.display()))?;
-        // Compression is off so a hard kill still leaves a readable prefix,
-        // which matters more on a robot than file size does.
         let writer = WriteOptions::new()
-            .compression(None)
+            .compression(compression.to_mcap())
             .profile("ros2")
             .create(BufWriter::new(file))?;
 
@@ -304,7 +324,7 @@ mod tests {
     fn known_types_get_a_ros2_schema_and_unknown_ones_survive_as_lcm() {
         let directory = scratch("mixed");
         let path = directory.join("out.mcap");
-        let recorder = Recorder::start(&path).unwrap();
+        let recorder = Recorder::start(&path, Compression::None).unwrap();
         recorder.offer(
             "/tele_cmd_vel",
             Some(msgs::TWIST_TYPE),
@@ -340,6 +360,32 @@ mod tests {
         assert_eq!(data, &vec![7u8; 16]);
 
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn compressed_recordings_still_read_back() {
+        for compression in [Compression::Lz4, Compression::Zstd] {
+            let directory = scratch("compressed");
+            let path = directory.join("out.mcap");
+            let recorder = Recorder::start(&path, compression).unwrap();
+            for _ in 0..64 {
+                recorder.offer(
+                    "/tele_cmd_vel",
+                    Some(msgs::TWIST_TYPE),
+                    &msgs::encode_twist([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+                );
+            }
+            recorder.finish().unwrap();
+
+            let bytes = std::fs::read(&path).unwrap();
+            let read: Vec<_> = mcap::MessageStream::new(&bytes)
+                .unwrap()
+                .map(|message| message.unwrap())
+                .collect();
+            assert_eq!(read.len(), 64, "{compression:?}");
+            assert_eq!(&read[0].data[4..12], &1.0f64.to_le_bytes());
+            std::fs::remove_dir_all(&directory).unwrap();
+        }
     }
 
     #[test]

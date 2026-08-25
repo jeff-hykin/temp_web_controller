@@ -1,6 +1,6 @@
 use crate::image::{self, EncodedFrame};
 use crate::msgs::{self, ImageMessage};
-use crate::record::{self, Recorder, RecordingStatus};
+use crate::record::{self, Compression, Recorder, RecordingStatus};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -36,6 +36,7 @@ pub struct Settings {
     pub auto_quality: bool,
     pub quality: u8,
     pub max_width: usize,
+    pub record_compression: Compression,
 }
 
 impl Default for Settings {
@@ -50,6 +51,7 @@ impl Default for Settings {
             auto_quality: true,
             quality: 70,
             max_width: 960,
+            record_compression: Compression::default(),
         }
     }
 }
@@ -65,6 +67,7 @@ pub struct SettingsPatch {
     pub auto_quality: Option<bool>,
     pub quality: Option<u8>,
     pub max_width: Option<usize>,
+    pub record_compression: Option<Compression>,
 }
 
 #[derive(Clone, Copy)]
@@ -106,6 +109,7 @@ pub struct TopicView {
     pub messages: u64,
     pub seconds_since_seen: f64,
     pub recorded: bool,
+    pub is_rpc: bool,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -180,9 +184,9 @@ pub struct Hub {
     command: Mutex<(Command, Instant)>,
     tf: Mutex<HashMap<(String, String), TfEdgeRecord>>,
     recorder: Mutex<Option<Recorder>>,
-    /// Held as an exclusion set rather than an inclusion set so a topic that
-    /// appears mid-recording is captured without anyone having to opt it in.
-    recording_excluded: RwLock<HashSet<String>>,
+    /// Only topics somebody actually toggled, so a topic that appears
+    /// mid-recording still lands on its default rather than on a stale answer.
+    recording_overrides: RwLock<HashMap<String, bool>>,
     record_dir: PathBuf,
 }
 
@@ -195,7 +199,7 @@ impl Hub {
             command: Mutex::new((Command::default(), Instant::now())),
             tf: Mutex::new(HashMap::new()),
             recorder: Mutex::new(None),
-            recording_excluded: RwLock::new(HashSet::new()),
+            recording_overrides: RwLock::new(HashMap::new()),
             record_dir,
         })
     }
@@ -232,6 +236,9 @@ impl Hub {
         }
         if let Some(value) = patch.max_width {
             settings.max_width = value.clamp(MIN_WIDTH, 1920);
+        }
+        if let Some(value) = patch.record_compression {
+            settings.record_compression = value;
         }
         settings.clone()
     }
@@ -283,16 +290,17 @@ impl Hub {
     }
 
     pub fn is_topic_recorded(&self, topic: &str) -> bool {
-        !self.recording_excluded.read().unwrap().contains(topic)
+        match self.recording_overrides.read().unwrap().get(topic) {
+            Some(&recorded) => recorded,
+            None => !is_rpc_topic(topic),
+        }
     }
 
     pub fn set_topic_recorded(&self, topic: &str, recorded: bool) {
-        let mut excluded = self.recording_excluded.write().unwrap();
-        if recorded {
-            excluded.remove(topic);
-        } else {
-            excluded.insert(topic.to_string());
-        }
+        self.recording_overrides
+            .write()
+            .unwrap()
+            .insert(topic.to_string(), recorded);
     }
 
     pub fn recording_status(&self) -> RecordingStatus {
@@ -309,7 +317,7 @@ impl Hub {
         if slot.is_some() {
             bail!("already recording");
         }
-        let recorder = Recorder::start(&path)?;
+        let recorder = Recorder::start(&path, self.settings().record_compression)?;
         let status = recorder.status();
         *slot = Some(recorder);
         Ok(status)
@@ -565,9 +573,12 @@ impl Hub {
                 messages: record.messages,
                 seconds_since_seen: record.last_seen.elapsed().as_secs_f64(),
                 recorded: self.is_topic_recorded(topic),
+                is_rpc: is_rpc_topic(topic),
             })
             .collect();
-        views.sort_by(|left, right| left.topic.cmp(&right.topic));
+        views.sort_by(|left, right| {
+            (left.is_rpc, &left.topic).cmp(&(right.is_rpc, &right.topic))
+        });
         views
     }
 
@@ -737,6 +748,14 @@ pub fn normalize(topic: &str) -> String {
     topic.trim_start_matches('/').to_owned()
 }
 
+/// dimos publishes every service call as a pair of `rpc/<Service>/<method>/{req,res}`
+/// topics. There are dozens of them and they bury the topics worth recording,
+/// so they sort last and stay off unless somebody asks for them.
+pub fn is_rpc_topic(topic: &str) -> bool {
+    let topic = normalize(topic);
+    topic.starts_with("rpc/") || topic.contains("/rpc/")
+}
+
 /// Cleans up a topic name typed into the settings drawer. `None` means the name
 /// is unusable and the current one should be kept, since a robot that quietly
 /// stops receiving commands is worse than one that ignores a typo. `#` is
@@ -770,6 +789,20 @@ pub fn parse_zenoh_key(key_expr: &str) -> (String, Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_topics_default_to_unrecorded_but_stay_overridable() {
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        assert!(!hub.is_topic_recorded("rpc/AlfredHighLevel/start/req"));
+        assert!(!hub.is_topic_recorded("/alfred/rpc/CalibRecorder/build/res"));
+        assert!(hub.is_topic_recorded("pointlio_odometry"));
+        assert!(hub.is_topic_recorded("rpc_status"));
+
+        hub.set_topic_recorded("rpc/AlfredHighLevel/start/req", true);
+        assert!(hub.is_topic_recorded("rpc/AlfredHighLevel/start/req"));
+        hub.set_topic_recorded("pointlio_odometry", false);
+        assert!(!hub.is_topic_recorded("pointlio_odometry"));
+    }
 
     #[test]
     fn channel_parsing_strips_the_type_suffix() {
@@ -832,6 +865,7 @@ mod tests {
             auto_quality: None,
             quality: None,
             max_width: None,
+            record_compression: None,
         }
     }
 

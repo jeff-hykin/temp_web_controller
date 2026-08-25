@@ -8,6 +8,7 @@ const state = {
     keys: new Set(),
     pad: { active: false, x: 0, y: 0 },
     strafeMode: false,
+    topics: [],
 }
 
 let control = null
@@ -202,52 +203,105 @@ function renderRecording(recording, topics) {
     }
 }
 
-/// Only the exclusions are remembered, never the inclusions, so a topic that
-/// shows up for the first time is still recorded by default.
-const EXCLUDED_KEY = "web_ctrl.excluded_topics"
+/// Only topics somebody actually toggled are remembered, so a topic that shows
+/// up for the first time still lands on its default rather than on a stale answer.
+const OVERRIDES_KEY = "web_ctrl.topic_overrides"
 
-function excludedTopics() {
+function topicOverrides() {
     try {
-        return new Set(JSON.parse(localStorage.getItem(EXCLUDED_KEY)) ?? [])
+        const stored = JSON.parse(localStorage.getItem(OVERRIDES_KEY))
+        return stored?.constructor === Object ? stored : {}
     } catch {
-        return new Set()
+        return {}
     }
 }
 
-function renderRecordTopics(topics) {
-    const excluded = excludedTopics()
-    // The server forgets the exclusions on restart, so re-apply them whenever it
-    // reports a topic as recorded that this browser had turned off.
+function wantsRecording(topic, overrides) {
+    return overrides[topic.topic] ?? !topic.is_rpc
+}
+
+function setTopicRecorded(topics, recorded) {
+    const overrides = topicOverrides()
     for (const topic of topics) {
-        if (topic.recorded && excluded.has(topic.topic)) {
-            send({ type: "record_topic", topic: topic.topic, recorded: false })
+        overrides[topic.topic] = recorded
+    }
+    localStorage.setItem(OVERRIDES_KEY, JSON.stringify(overrides))
+    for (const topic of topics) {
+        send({ type: "record_topic", topic: topic.topic, recorded })
+        topic.recorded = recorded
+    }
+    renderRecordTopics(state.topics)
+}
+
+let rpcExpanded = false
+
+function renderRecordTopics(topics) {
+    state.topics = topics
+    const overrides = topicOverrides()
+    // The server forgets the overrides on restart, so re-assert any topic whose
+    // live state has drifted from what this browser asked for.
+    for (const topic of topics) {
+        const wanted = wantsRecording(topic, overrides)
+        if (topic.recorded !== wanted) {
+            send({ type: "record_topic", topic: topic.topic, recorded: wanted })
         }
     }
 
-    const list = element("record-topics")
-    list.replaceChildren(...topics.map((topic) => {
-        const row = document.createElement("label")
-        row.className = "record-topic"
-        const box = document.createElement("input")
-        box.type = "checkbox"
-        box.checked = topic.recorded && !excluded.has(topic.topic)
-        box.addEventListener("change", () => {
-            const next = excludedTopics()
-            if (box.checked) {
-                next.delete(topic.topic)
-            } else {
-                next.add(topic.topic)
-            }
-            localStorage.setItem(EXCLUDED_KEY, JSON.stringify([...next]))
-            send({ type: "record_topic", topic: topic.topic, recorded: box.checked })
-        })
-        const name = document.createElement("span")
-        name.textContent = topic.topic
-        const type = document.createElement("em")
-        type.textContent = topic.msg_type ?? "?"
-        row.append(box, name, type)
-        return row
-    }))
+    const plain = topics.filter((topic) => !topic.is_rpc)
+    const rpc = topics.filter((topic) => topic.is_rpc)
+    const row = (topic) => recordTopicRow(topic, wantsRecording(topic, overrides))
+    const rows = plain.map(row)
+    if (rpc.length > 0) {
+        rows.push(rpcHeaderRow(rpc, overrides))
+        if (rpcExpanded) {
+            rows.push(...rpc.map(row))
+        }
+    }
+    element("record-topics").replaceChildren(...rows)
+}
+
+function recordTopicRow(topic, checked) {
+    const row = document.createElement("label")
+    row.className = "record-topic"
+    const box = document.createElement("input")
+    box.type = "checkbox"
+    box.checked = checked
+    box.addEventListener("change", () => setTopicRecorded([topic], box.checked))
+    const name = document.createElement("span")
+    name.textContent = topic.topic
+    const type = document.createElement("em")
+    type.textContent = topic.msg_type ?? "?"
+    row.append(box, name, type)
+    return row
+}
+
+function rpcHeaderRow(rpc, overrides) {
+    const on = rpc.filter((topic) => wantsRecording(topic, overrides)).length
+
+    const box = document.createElement("input")
+    box.type = "checkbox"
+    box.checked = on === rpc.length
+    box.indeterminate = on > 0 && on < rpc.length
+    box.addEventListener("change", () => setTopicRecorded(rpc, box.checked))
+
+    const name = document.createElement("span")
+    name.textContent = `RPC topics (${on}/${rpc.length})`
+
+    const label = document.createElement("label")
+    label.append(box, name)
+
+    const expand = document.createElement("button")
+    expand.className = "ghost small"
+    expand.textContent = rpcExpanded ? "Hide" : "Show"
+    expand.addEventListener("click", () => {
+        rpcExpanded = !rpcExpanded
+        renderRecordTopics(state.topics)
+    })
+
+    const row = document.createElement("div")
+    row.className = "record-topic rpc-head"
+    row.append(label, expand)
+    return row
 }
 
 async function pollRecordings() {
@@ -814,6 +868,12 @@ function renderSettings(settings) {
         element(id).checked = settings[key]
     }
     element("quality").disabled = settings.auto_quality
+
+    const compression = element("record-compression")
+    compression.value = settings.record_compression
+    // The writer is built when recording starts, so a mid-run change would
+    // silently not apply.
+    compression.disabled = state.recording?.active === true
 }
 
 function setupSettings() {
@@ -847,6 +907,10 @@ function setupSettings() {
             send({ type: "settings", [key]: event.target.checked })
         })
     }
+    element("record-compression").addEventListener("change", (event) => {
+        state.settings.record_compression = event.target.value
+        send({ type: "settings", record_compression: event.target.value })
+    })
     const show = (open) => {
         element("settings").hidden = !open
         element("settings-scrim").hidden = !open

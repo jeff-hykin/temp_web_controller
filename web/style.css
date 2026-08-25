@@ -511,7 +511,8 @@ input[type="range"] {
     gap: 12px;
 }
 
-.row.text input {
+.row.text input,
+.row.text select {
     flex: 1;
     min-width: 0;
     padding: 7px 10px;
@@ -522,6 +523,10 @@ input[type="range"] {
     font: inherit;
     font-size: 13px;
     text-align: right;
+}
+
+.row.text select:disabled {
+    color: var(--faint);
 }
 
 .slider em {
@@ -845,6 +850,22 @@ input[type="range"] {
     font-style: normal;
     font-size: 11px;
     color: var(--faint);
+}
+
+/* Reads as a section heading for the rows it gates, not as another topic. */
+.record-topic.rpc-head {
+    grid-template-columns: 1fr auto;
+    margin-top: 6px;
+    background: transparent;
+    border: 1px solid var(--hairline);
+    font-weight: 600;
+}
+
+.record-topic.rpc-head label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
 }
 
 .record-files {

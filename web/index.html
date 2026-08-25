@@ -161,9 +161,22 @@
         </div>
 
         <div class="group">
+            <p class="group-title">File</p>
+            <label class="row text">
+                <span>Compression</span>
+                <select id="record-compression">
+                    <option value="none">none</option>
+                    <option value="lz4">lz4</option>
+                    <option value="zstd">zstd</option>
+                </select>
+            </label>
+            <p class="hint-text">lz4 shrinks depth frames for almost no CPU. zstd is smaller but slower. none leaves the most readable file after a hard kill. Applies to the next recording.</p>
+        </div>
+
+        <div class="group">
             <p class="group-title">Topics to record</p>
             <div id="record-topics" class="record-topics"></div>
-            <p class="hint-text">New topics are recorded automatically. Uncheck one to leave it out.</p>
+            <p class="hint-text">New topics are recorded automatically. RPC topics are off by default.</p>
         </div>
 
         <div class="group">
