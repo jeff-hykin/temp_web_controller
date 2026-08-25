@@ -1,4 +1,4 @@
-use crate::image::{self, EncodedFrame};
+use crate::image::{self, EncodedFrame, ImageFormat};
 use crate::msgs::{self, ImageMessage};
 use crate::record::{self, Compression, Recorder, RecordingStatus};
 use anyhow::{bail, Result};
@@ -37,6 +37,7 @@ pub struct Settings {
     pub quality: u8,
     pub max_width: usize,
     pub record_compression: Compression,
+    pub record_image_format: ImageFormat,
 }
 
 impl Default for Settings {
@@ -52,6 +53,7 @@ impl Default for Settings {
             quality: 70,
             max_width: 960,
             record_compression: Compression::default(),
+            record_image_format: ImageFormat::default(),
         }
     }
 }
@@ -68,6 +70,7 @@ pub struct SettingsPatch {
     pub quality: Option<u8>,
     pub max_width: Option<usize>,
     pub record_compression: Option<Compression>,
+    pub record_image_format: Option<ImageFormat>,
 }
 
 #[derive(Clone, Copy)]
@@ -240,6 +243,9 @@ impl Hub {
         if let Some(value) = patch.record_compression {
             settings.record_compression = value;
         }
+        if let Some(value) = patch.record_image_format {
+            settings.record_image_format = value;
+        }
         settings.clone()
     }
 
@@ -317,7 +323,9 @@ impl Hub {
         if slot.is_some() {
             bail!("already recording");
         }
-        let recorder = Recorder::start(&path, self.settings().record_compression)?;
+        let settings = self.settings();
+        let recorder =
+            Recorder::start(&path, settings.record_compression, settings.record_image_format)?;
         let status = recorder.status();
         *slot = Some(recorder);
         Ok(status)
@@ -866,6 +874,7 @@ mod tests {
             quality: None,
             max_width: None,
             record_compression: None,
+            record_image_format: None,
         }
     }
 

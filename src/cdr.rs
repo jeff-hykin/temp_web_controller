@@ -45,44 +45,49 @@ pub fn to_ros2(msg_type: &str, payload: &[u8]) -> Option<Encoded> {
 }
 
 fn image(msg_type: &str, payload: &[u8]) -> Option<Encoded> {
-    let mut writer = CdrWriter::new();
     match msgs::decode_any_image(msg_type, payload).ok()? {
-        ImageMessage::Raw(image) => {
-            write_header(&mut writer, &image.header);
-            writer.u32(image.height as u32);
-            writer.u32(image.width as u32);
-            writer.string(&image.encoding);
-            writer.u8(image.is_bigendian);
-            writer.u32(image.step as u32);
-            writer.bytes(&image.data);
-            Some(Encoded {
-                schema_name: "sensor_msgs/msg/Image".into(),
-                schema_text: format!(
-                    "std_msgs/Header header\n\
-                     uint32 height\n\
-                     uint32 width\n\
-                     string encoding\n\
-                     uint8 is_bigendian\n\
-                     uint32 step\n\
-                     uint8[] data\n\n{HEADER_MSG}\n{TIME_MSG}"
-                ),
-                data: writer.finish(),
-            })
-        }
-        ImageMessage::Compressed(image) => {
-            write_header(&mut writer, &image.header);
-            writer.string(&image.format);
-            writer.bytes(&image.data);
-            Some(Encoded {
-                schema_name: "sensor_msgs/msg/CompressedImage".into(),
-                schema_text: format!(
-                    "std_msgs/Header header\n\
-                     string format\n\
-                     uint8[] data\n\n{HEADER_MSG}\n{TIME_MSG}"
-                ),
-                data: writer.finish(),
-            })
-        }
+        ImageMessage::Raw(image) => Some(raw_image(&image)),
+        ImageMessage::Compressed(image) => Some(compressed_image(&image)),
+    }
+}
+
+fn raw_image(image: &msgs::RawImage) -> Encoded {
+    let mut writer = CdrWriter::new();
+    write_header(&mut writer, &image.header);
+    writer.u32(image.height as u32);
+    writer.u32(image.width as u32);
+    writer.string(&image.encoding);
+    writer.u8(image.is_bigendian);
+    writer.u32(image.step as u32);
+    writer.bytes(&image.data);
+    Encoded {
+        schema_name: "sensor_msgs/msg/Image".into(),
+        schema_text: format!(
+            "std_msgs/Header header\n\
+             uint32 height\n\
+             uint32 width\n\
+             string encoding\n\
+             uint8 is_bigendian\n\
+             uint32 step\n\
+             uint8[] data\n\n{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        data: writer.finish(),
+    }
+}
+
+pub fn compressed_image(image: &msgs::CompressedImage) -> Encoded {
+    let mut writer = CdrWriter::new();
+    write_header(&mut writer, &image.header);
+    writer.string(&image.format);
+    writer.bytes(&image.data);
+    Encoded {
+        schema_name: "sensor_msgs/msg/CompressedImage".into(),
+        schema_text: format!(
+            "std_msgs/Header header\n\
+             string format\n\
+             uint8[] data\n\n{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        data: writer.finish(),
     }
 }
 

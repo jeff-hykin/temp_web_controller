@@ -852,6 +852,11 @@ const SETTING_TOGGLES = {
     "auto-quality": "auto_quality",
 }
 
+const RECORD_SELECTS = {
+    "record-image-format": "record_image_format",
+    "record-compression": "record_compression",
+}
+
 function renderSettings(settings) {
     const topic = element("publish-topic")
     if (document.activeElement !== topic) {
@@ -869,11 +874,13 @@ function renderSettings(settings) {
     }
     element("quality").disabled = settings.auto_quality
 
-    const compression = element("record-compression")
-    compression.value = settings.record_compression
-    // The writer is built when recording starts, so a mid-run change would
-    // silently not apply.
-    compression.disabled = state.recording?.active === true
+    for (const [id, key] of Object.entries(RECORD_SELECTS)) {
+        const select = element(id)
+        select.value = settings[key]
+        // The writer is built when recording starts, so a mid-run change would
+        // silently not apply.
+        select.disabled = state.recording?.active === true
+    }
 }
 
 function setupSettings() {
@@ -907,10 +914,12 @@ function setupSettings() {
             send({ type: "settings", [key]: event.target.checked })
         })
     }
-    element("record-compression").addEventListener("change", (event) => {
-        state.settings.record_compression = event.target.value
-        send({ type: "settings", record_compression: event.target.value })
-    })
+    for (const [id, key] of Object.entries(RECORD_SELECTS)) {
+        element(id).addEventListener("change", (event) => {
+            state.settings[key] = event.target.value
+            send({ type: "settings", [key]: event.target.value })
+        })
+    }
     const show = (open) => {
         element("settings").hidden = !open
         element("settings-scrim").hidden = !open

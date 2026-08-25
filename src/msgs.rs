@@ -69,6 +69,7 @@ impl<'a> Reader<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct Header {
     pub stamp_sec: i32,
     pub stamp_nsec: i32,

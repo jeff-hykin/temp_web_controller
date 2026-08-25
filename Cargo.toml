@@ -12,14 +12,21 @@ anyhow = "1"
 axum = { version = "0.8", features = ["ws"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
+image-webp = "0.2.4"
 jpeg-encoder = "0.6"
 mcap = { version = "0.25.0", default-features = false, features = ["lz4", "zstd"] }
+png = "0.18.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 socket2 = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 zenoh = { version = "1", features = ["unstable"] }
+zune-core = "0.5.3"
+zune-jpegxl = "0.5.2"
 
 [profile.release]
 opt-level = 3
 lto = "thin"
+
+[dev-dependencies]
+jxl-oxide = { version = "0.12.6", default-features = false }

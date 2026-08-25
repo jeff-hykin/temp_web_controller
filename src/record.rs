@@ -19,6 +19,9 @@ use anyhow::{Context, Result};
 use mcap::{WriteOptions, Writer};
 use serde::{Deserialize, Serialize};
 
+use crate::image::ImageFormat;
+use crate::msgs::{self, ImageMessage};
+
 /// Deep enough to ride out a disk hiccup, shallow enough that we shed frames
 /// instead of growing an unbounded backlog.
 const QUEUE_DEPTH: usize = 256;
@@ -37,14 +40,14 @@ struct Counters {
     dropped: AtomicU64,
 }
 
-/// Chunk compression for the mcap file. `None` is the safest under a hard kill
-/// (the file stays readable up to the last message) but depth frames make a
-/// recording enormous, so lz4 is the default trade.
+/// Chunk compression for the mcap file. The default stays off so a hard kill
+/// still leaves a readable prefix; picking an image format shrinks a recording
+/// far more than chunk compression can anyway.
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Debug, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Compression {
-    None,
     #[default]
+    None,
     Lz4,
     Zstd,
 }
@@ -78,7 +81,7 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    pub fn start(path: &Path, compression: Compression) -> Result<Self> {
+    pub fn start(path: &Path, compression: Compression, image_format: ImageFormat) -> Result<Self> {
         if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("could not create {}", parent.display()))?;
@@ -94,7 +97,7 @@ impl Recorder {
         let worker_counters = Arc::clone(&counters);
         let worker = std::thread::Builder::new()
             .name("mcap-writer".into())
-            .spawn(move || drain(writer, receiver, worker_counters))?;
+            .spawn(move || drain(writer, receiver, worker_counters, image_format))?;
 
         Ok(Recorder {
             path: path.to_path_buf(),
@@ -164,13 +167,14 @@ fn drain(
     mut writer: Writer<BufWriter<File>>,
     receiver: Receiver<Sample>,
     counters: Arc<Counters>,
+    image_format: ImageFormat,
 ) -> Result<()> {
     let mut channels: HashMap<String, (u16, u32)> = HashMap::new();
     for sample in receiver {
         let encoded = sample
             .msg_type
             .as_deref()
-            .and_then(|msg_type| crate::cdr::to_ros2(msg_type, &sample.payload));
+            .and_then(|msg_type| transcode(msg_type, &sample.payload, image_format));
 
         let channel_id = match channels.get(&sample.topic) {
             Some((id, _)) => *id,
@@ -219,6 +223,21 @@ fn drain(
     }
     writer.finish()?;
     Ok(())
+}
+
+/// Re-encodes a sample for the file. Raw image frames become a
+/// `CompressedImage` when a format is chosen and can hold them; a format that
+/// would lose precision falls through to storing the frame untouched, so a
+/// depth topic is never silently degraded by a colour-only codec.
+fn transcode(msg_type: &str, payload: &[u8], image_format: ImageFormat) -> Option<crate::cdr::Encoded> {
+    if image_format != ImageFormat::Raw && msg_type == msgs::IMAGE_TYPE {
+        if let Ok(ImageMessage::Raw(raw)) = msgs::decode_any_image(msg_type, payload) {
+            if let Some(compressed) = crate::image::compress(&raw, image_format) {
+                return Some(crate::cdr::compressed_image(&compressed));
+            }
+        }
+    }
+    crate::cdr::to_ros2(msg_type, payload)
 }
 
 /// Without a schema the LCM type name is the only clue a reader has about what
@@ -324,7 +343,7 @@ mod tests {
     fn known_types_get_a_ros2_schema_and_unknown_ones_survive_as_lcm() {
         let directory = scratch("mixed");
         let path = directory.join("out.mcap");
-        let recorder = Recorder::start(&path, Compression::None).unwrap();
+        let recorder = Recorder::start(&path, Compression::None, ImageFormat::Raw).unwrap();
         recorder.offer(
             "/tele_cmd_vel",
             Some(msgs::TWIST_TYPE),
@@ -367,7 +386,7 @@ mod tests {
         for compression in [Compression::Lz4, Compression::Zstd] {
             let directory = scratch("compressed");
             let path = directory.join("out.mcap");
-            let recorder = Recorder::start(&path, compression).unwrap();
+            let recorder = Recorder::start(&path, compression, ImageFormat::Raw).unwrap();
             for _ in 0..64 {
                 recorder.offer(
                     "/tele_cmd_vel",
@@ -386,6 +405,58 @@ mod tests {
             assert_eq!(&read[0].data[4..12], &1.0f64.to_le_bytes());
             std::fs::remove_dir_all(&directory).unwrap();
         }
+    }
+
+    /// Builds the LCM bytes for a `sensor_msgs.Image`, since the recorder only
+    /// ever sees a topic name plus a wire payload.
+    fn lcm_image(encoding: &str, bytes_per_pixel: usize) -> Vec<u8> {
+        let (width, height) = (8usize, 4usize);
+        let pixels = width * height * bytes_per_pixel;
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&msgs::IMAGE_FINGERPRINT);
+        payload.extend_from_slice(&(pixels as i32).to_be_bytes());
+        for field in [0i32, 0, 0] {
+            payload.extend_from_slice(&field.to_be_bytes());
+        }
+        let push_string = |value: &str, payload: &mut Vec<u8>| {
+            payload.extend_from_slice(&((value.len() + 1) as u32).to_be_bytes());
+            payload.extend_from_slice(value.as_bytes());
+            payload.push(0);
+        };
+        push_string("camera_link", &mut payload);
+        payload.extend_from_slice(&(height as i32).to_be_bytes());
+        payload.extend_from_slice(&(width as i32).to_be_bytes());
+        push_string(encoding, &mut payload);
+        payload.push(0);
+        payload.extend_from_slice(&((width * bytes_per_pixel) as i32).to_be_bytes());
+        payload.extend_from_slice(&(pixels as i32).to_be_bytes());
+        payload.extend((0..pixels).map(|index| (index * 11) as u8));
+        payload
+    }
+
+    #[test]
+    fn a_chosen_image_format_applies_only_where_it_fits() {
+        let directory = scratch("image_format");
+        let path = directory.join("out.mcap");
+        let recorder = Recorder::start(&path, Compression::None, ImageFormat::Webp).unwrap();
+        recorder.offer("/camera", Some(msgs::IMAGE_TYPE), &lcm_image("rgb8", 3));
+        recorder.offer("/depth", Some(msgs::IMAGE_TYPE), &lcm_image("16UC1", 2));
+        recorder.finish().unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let mut seen = HashMap::new();
+        for message in mcap::MessageStream::new(&bytes).unwrap() {
+            let message = message.unwrap();
+            seen.insert(
+                message.channel.topic.clone(),
+                message.channel.schema.as_ref().map(|s| s.name.clone()),
+            );
+        }
+        assert_eq!(seen["/camera"].as_deref(), Some("sensor_msgs/msg/CompressedImage"));
+        // webp cannot hold 16-bit samples, so depth keeps its full precision.
+        assert_eq!(seen["/depth"].as_deref(), Some("sensor_msgs/msg/Image"));
+
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

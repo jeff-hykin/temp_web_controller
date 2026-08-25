@@ -163,6 +163,17 @@
         <div class="group">
             <p class="group-title">File</p>
             <label class="row text">
+                <span>Image format</span>
+                <select id="record-image-format">
+                    <option value="raw">raw</option>
+                    <option value="png">png</option>
+                    <option value="jpegxl">jpegxl</option>
+                    <option value="webp">webp</option>
+                    <option value="jpeg">jpeg</option>
+                </select>
+            </label>
+            <p class="hint-text">png and jpegxl are lossless and hold 16-bit depth. webp is lossless but colour only, jpeg is lossy and colour only &mdash; under either, depth topics stay raw rather than lose precision.</p>
+            <label class="row text">
                 <span>Compression</span>
                 <select id="record-compression">
                     <option value="none">none</option>
@@ -170,7 +181,7 @@
                     <option value="zstd">zstd</option>
                 </select>
             </label>
-            <p class="hint-text">lz4 shrinks depth frames for almost no CPU. zstd is smaller but slower. none leaves the most readable file after a hard kill. Applies to the next recording.</p>
+            <p class="hint-text">Whole-file chunk compression, applied on top of the image format. none leaves the most readable file after a hard kill. Both apply to the next recording.</p>
         </div>
 
         <div class="group">
