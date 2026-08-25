@@ -35,6 +35,23 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
 --launch-file <PATH>              saved launcher commands [default: ~/.dimos/temp_web_control.json]
 ```
 
+## Start on boot
+
+```sh
+web_ctrl survive_reboot [same options you would normally pass]
+```
+
+Installs a systemd unit on Linux or a launchd daemon on macOS, then starts it,
+so the robot comes back on its own after a power cut. It asks for sudo. The
+options you pass are baked into the service, and relative paths are made
+absolute first since a service does not inherit your shell's directory.
+
+If `web_ctrl` came from nix, the service points at `~/.nix-profile/bin/web_ctrl`
+rather than the `/nix/store` path, so a later `nix profile upgrade` reaches it.
+
+Undo it with `sudo systemctl disable --now web_ctrl`, or on macOS
+`sudo launchctl bootout system/com.jeffhykin.web_ctrl`.
+
 ## Controls
 
 - `W`/`A`/`S`/`D` or arrow keys to drive, `Q`/`E` to strafe, space to stop
