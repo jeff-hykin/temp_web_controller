@@ -470,6 +470,13 @@ input[type="range"] {
     overflow: hidden;
 }
 
+.group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding-right: 10px;
+}
+
 .group-title {
     margin: 0;
     padding: 11px 14px 7px;
@@ -889,15 +896,14 @@ input[type="range"] {
     color: var(--bad);
 }
 
-.launch-row {
+.launch-form {
     display: flex;
-    align-items: center;
+    flex-direction: column;
     gap: 8px;
+    padding: 0 14px 14px;
 }
 
-.launch-run {
-    flex: 1;
-    min-width: 0;
+.launch-form input {
     padding: 10px 12px;
     border: 1px solid var(--hairline);
     border-radius: 12px;
@@ -905,12 +911,95 @@ input[type="range"] {
     color: var(--text);
     font: inherit;
     font-size: 13px;
-    text-align: left;
+}
+
+.launch-form input::placeholder {
+    color: var(--faint);
+}
+
+.save-button {
+    align-self: flex-end;
+    padding: 9px 22px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--accent);
+    font-size: 14px;
+    font-weight: 600;
+    color: #fff;
+}
+
+.save-button:disabled {
+    background: var(--surface-strong);
+    color: var(--faint);
+}
+
+.launch-row {
+    display: grid;
+    grid-template-columns: 1fr auto auto;
+    align-items: center;
+    gap: 4px 8px;
+    padding: 8px 10px;
+    border-radius: 12px;
+    background: var(--surface);
+    font-size: 13px;
+}
+
+.launch-row span {
+    grid-row: 1;
     overflow-wrap: anywhere;
+}
+
+.launch-row em {
+    grid-column: 1;
+    grid-row: 2;
+    font-style: normal;
+    font-size: 11px;
+    color: var(--faint);
+    overflow-wrap: anywhere;
+}
+
+.launch-row button {
+    grid-row: 1 / span 2;
+}
+
+.launch-run {
+    padding: 8px 16px;
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    background: var(--surface-strong);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 600;
 }
 
 .launch-run:disabled {
     color: var(--faint);
+}
+
+/* Every button in the launcher acts on the robot rather than on the page, so the
+   result can be a second or two away. These give the press something to show for
+   itself in the meantime. */
+.launch-run:active, .save-button:active, .record-button:active, .ghost.small:active {
+    transform: scale(0.97);
+    filter: brightness(1.35);
+}
+
+.launch-run.starting {
+    animation: pulse 0.9s ease-out infinite;
+    border-color: var(--accent);
+    color: var(--text);
+}
+
+@keyframes pulse {
+    50% {
+        background: rgba(10, 132, 255, 0.22);
+    }
+}
+
+.record-button:disabled {
+    animation: pulse 0.9s ease-out infinite;
+    opacity: 0.85;
 }
 
 #launch-open.running {

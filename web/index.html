@@ -187,24 +187,23 @@
         <div class="group">
             <p class="group-title">Saved commands</p>
             <div id="launch-list" class="record-topics"></div>
-            <p class="hint-text">Tap a name to run it. Only one runs at a time.</p>
+            <p class="hint-text">Only one runs at a time.</p>
         </div>
 
         <div class="group">
             <p class="group-title">Add a command</p>
-            <label class="row text">
-                <span>Name</span>
-                <input type="text" id="launch-name" placeholder="alfred nav" spellcheck="false" autocapitalize="off" autocomplete="off">
-            </label>
-            <label class="row text">
-                <span>Command</span>
-                <input type="text" id="launch-command" placeholder="cd ~/dimos &amp;&amp; .venv/bin/python ..." spellcheck="false" autocapitalize="off" autocomplete="off">
-            </label>
-            <button id="launch-save" class="row link"><span>Save</span></button>
+            <div class="launch-form">
+                <input type="text" id="launch-name" aria-label="Command name" placeholder="Name, like alfred nav" spellcheck="false" autocapitalize="off" autocomplete="off">
+                <input type="text" id="launch-command" aria-label="Shell command" placeholder="cd ~/dimos &amp;&amp; .venv/bin/python ..." spellcheck="false" autocapitalize="off" autocomplete="off">
+                <button id="launch-save" class="save-button" disabled>Save</button>
+            </div>
         </div>
 
         <div class="group">
-            <p class="group-title">Output</p>
+            <div class="group-head">
+                <p class="group-title">Output</p>
+                <button id="launch-copy" class="ghost small">Copy</button>
+            </div>
             <pre id="launch-output" class="launch-output">nothing launched yet</pre>
         </div>
     </aside>

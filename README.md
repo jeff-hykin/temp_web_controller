@@ -89,9 +89,9 @@ path, and a delete that needs a second click to confirm.
 ## Launcher
 
 The Launch button opens a panel that runs shell commands on the machine hosting the binary.
-A command is a name paired with a bash line; saving one adds a button that runs it. The last
-handful of stdout and stderr lines stream into the panel while it runs, and the exit code is
-shown in red if it crashes.
+A command is a name paired with a bash line; saving one adds a row with its own Launch button.
+The last handful of stdout and stderr lines stream into the panel while it runs, and the exit
+code is shown in red if it crashes. Copy lifts that output to the clipboard.
 
 Commands live on the robot, in `~/.dimos/temp_web_control.json`, not in the browser — one
 person can add a command and someone else can run it from their own phone. The output stream

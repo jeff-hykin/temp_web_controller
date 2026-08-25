@@ -52,10 +52,27 @@ function applyStatus(status) {
     renderValues()
 }
 
+/// The last launcher state the server reported, kept so a save or a delete can
+/// redraw the list immediately instead of looking ignored until the next poll.
+let launcherView = null
+// Not 0: performance.now() starts near zero, so that would read as a press that
+// just happened and the button would load already stuck on "Killing…".
+let killPressedAt = -Infinity
+
+/// Derived from a timestamp rather than unwound by a timer, because a backgrounded
+/// tab throttles timers and would leave the button stranded on "Killing…".
+function renderKillButton() {
+    const killing = performance.now() - killPressedAt < 2000
+    const button = element("launch-kill")
+    button.disabled = killing
+    button.textContent = killing ? "Killing…" : "Kill blueprint"
+}
+
 function renderLauncher(launcher) {
     if (!launcher) {
         return
     }
+    launcherView = launcher
     const running = launcher.running
     const failed = !running && launcher.finished && launcher.finished.code !== 0
     element("launch-state").textContent = running
@@ -65,6 +82,7 @@ function renderLauncher(launcher) {
             : "idle"
     element("launch-state").classList.toggle("failed", Boolean(failed))
     element("launch-open").classList.toggle("running", Boolean(running))
+    renderKillButton()
 
     const output = element("launch-output")
     output.textContent = launcher.lines.length ? launcher.lines.join("\n") : "nothing launched yet"
@@ -82,12 +100,24 @@ function renderLauncher(launcher) {
     list.replaceChildren(...launcher.commands.map((saved) => {
         const row = document.createElement("div")
         row.className = "launch-row"
+        const label = document.createElement("span")
+        label.textContent = saved.name
+        // The command itself is worth showing, since a tooltip is unreachable on
+        // the phone this is mostly used from.
+        const detail = document.createElement("em")
+        detail.textContent = saved.command
         const run = document.createElement("button")
         run.className = "launch-run"
-        run.textContent = saved.name
-        run.title = saved.command
+        run.textContent = "Launch"
         run.disabled = Boolean(running)
-        run.addEventListener("click", () => send({ type: "launch_run", name: saved.name }))
+        run.addEventListener("click", () => {
+            send({ type: "launch_run", name: saved.name })
+            // Nothing comes back until the command produces its first line, so say
+            // out loud that the press landed.
+            run.classList.add("starting")
+            element("launch-state").textContent = `starting ${saved.name}…`
+            element("launch-state").classList.remove("failed")
+        })
         const stop = document.createElement("button")
         stop.className = "ghost small"
         if (running?.name === saved.name) {
@@ -96,9 +126,15 @@ function renderLauncher(launcher) {
         } else {
             stop.textContent = "Delete"
             stop.classList.add("danger")
-            stop.addEventListener("click", () => send({ type: "launch_delete", name: saved.name }))
+            stop.addEventListener("click", () => {
+                send({ type: "launch_delete", name: saved.name })
+                renderLauncher({
+                    ...launcher,
+                    commands: launcher.commands.filter((other) => other.name !== saved.name),
+                })
+            })
         }
-        row.append(run, stop)
+        row.append(label, detail, run, stop)
         return row
     }))
 }
@@ -841,14 +877,56 @@ function setupSettings() {
     element("launch-close").addEventListener("click", () => showLaunch(false))
     element("launch-scrim").addEventListener("click", () => showLaunch(false))
 
-    element("launch-kill").addEventListener("click", () => send({ type: "launch_kill" }))
-    element("launch-save").addEventListener("click", () => {
-        const name = element("launch-name")
-        const command = element("launch-command")
-        send({ type: "launch_save", name: name.value, command: command.value })
-        name.value = ""
-        command.value = ""
+    const copyButton = element("launch-copy")
+    copyButton.addEventListener("click", async () => {
+        await copyText(element("launch-output").textContent)
+        copyButton.textContent = "Copied"
+        setTimeout(() => { copyButton.textContent = "Copy" }, 1200)
     })
+
+    element("launch-kill").addEventListener("click", () => {
+        send({ type: "launch_kill" })
+        // The sweep takes a second or two before anything reaches the output, which
+        // without this reads as the button having done nothing at all.
+        killPressedAt = performance.now()
+        renderKillButton()
+    })
+
+    const nameInput = element("launch-name")
+    const commandInput = element("launch-command")
+    const saveButton = element("launch-save")
+    const refreshSaveButton = () => {
+        saveButton.disabled = !nameInput.value.trim() || !commandInput.value.trim()
+    }
+    const saveCommand = () => {
+        const name = nameInput.value.trim()
+        const command = commandInput.value.trim()
+        if (!name || !command) {
+            return
+        }
+        send({ type: "launch_save", name, command })
+        nameInput.value = ""
+        commandInput.value = ""
+        refreshSaveButton()
+        if (launcherView) {
+            const existing = launcherView.commands.some((saved) => saved.name === name)
+            renderLauncher({
+                ...launcherView,
+                commands: existing
+                    ? launcherView.commands.map((saved) => saved.name === name ? { name, command } : saved)
+                    : [...launcherView.commands, { name, command }],
+            })
+        }
+    }
+    for (const input of [nameInput, commandInput]) {
+        input.addEventListener("input", refreshSaveButton)
+        input.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                saveCommand()
+            }
+        })
+    }
+    saveButton.addEventListener("click", saveCommand)
 }
 
 function startCommandLoop() {
