@@ -260,10 +260,13 @@ impl Hub {
         if received.elapsed() > Duration::from_millis(settings.deadman_ms) {
             return (0.0, 0.0, 0.0);
         }
-        let turn_sign = if settings.invert_turn { -1.0 } else { 1.0 };
+        let turn_sign = if settings.invert_turn { 1.0 } else { -1.0 };
         (
             command.forward.clamp(-1.0, 1.0) * settings.linear_speed,
-            command.strafe.clamp(-1.0, 1.0) * settings.linear_speed,
+            // The browser sends screen-space axes where right is positive, but
+            // REP-103 puts +y to the left and +yaw counter-clockwise, so both flip
+            // here rather than in three separate places in the frontend.
+            -command.strafe.clamp(-1.0, 1.0) * settings.linear_speed,
             command.turn.clamp(-1.0, 1.0) * settings.angular_speed * turn_sign,
         )
     }
@@ -872,7 +875,23 @@ mod tests {
         });
         let (linear_x, _, angular_z) = hub.current_command();
         assert!((linear_x - 0.25).abs() < 1e-9);
-        assert!((angular_z + 0.25).abs() < 1e-9);
+        assert!((angular_z - 0.25).abs() < 1e-9);
+    }
+
+    /// dimos's own keyboard teleop sends `angular.z = +speed` for A and
+    /// `linear.y = +speed` for Q, so screen-right has to leave here negative or
+    /// the robot turns and strafes the opposite way from every other teleop source.
+    #[test]
+    fn screen_right_turns_and_strafes_right_in_rep_103() {
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        hub.set_command(Command {
+            forward: 0.0,
+            strafe: 1.0,
+            turn: 1.0,
+        });
+        let (_, linear_y, angular_z) = hub.current_command();
+        assert!(linear_y < 0.0);
+        assert!(angular_z < 0.0);
     }
 
     #[test]
