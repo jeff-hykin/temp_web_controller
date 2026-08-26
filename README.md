@@ -95,10 +95,10 @@ Unchecked topics are remembered in the browser's local storage and re-applied wh
 restarts, so the same handful does not have to be unchecked every session. Only the exclusions
 are stored, so a topic seen for the first time is still recorded.
 
-Types the binary understands (`Image`, `CompressedImage`, `Twist`, `TFMessage`) are transcoded
-to ROS2 CDR with a schema, so the file opens in Foxglove directly. Anything else is stored as
-raw LCM bytes under a schema-less channel tagged with its type name, so a recording is never
-silently incomplete.
+Types the binary understands (`Image`, `CompressedImage`, `Twist`, `TFMessage`, `PointCloud2`,
+`Odometry`, `PoseStamped`, `Imu`, `CameraInfo`) are transcoded to ROS2 CDR with a schema, so the
+file opens in Foxglove directly. Anything else is stored as raw LCM bytes under a schema-less
+channel tagged with its type name, so a recording is never silently incomplete.
 
 The panel also lists finished files with their size and age, a button that copies the absolute
 path, and a delete that needs a second click to confirm.

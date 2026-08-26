@@ -349,9 +349,12 @@ mod tests {
             Some(msgs::TWIST_TYPE),
             &msgs::encode_twist([1.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
         );
-        recorder.offer("/mystery", Some("nav_msgs.Odometry"), &[7u8; 16]);
+        recorder.offer("/mystery", Some("std_msgs.Float64MultiArray"), &[7u8; 16]);
+        // A type we do map, but whose bytes do not decode, must also survive
+        // rather than being dropped for failing its fingerprint.
+        recorder.offer("/garbled", Some(msgs::ODOMETRY_TYPE), &[9u8; 16]);
         let status = recorder.finish().unwrap();
-        assert_eq!(status.messages, 2);
+        assert_eq!(status.messages, 3);
         assert!(!status.active);
 
         let bytes = std::fs::read(&path).unwrap();
@@ -377,6 +380,11 @@ mod tests {
         assert_eq!(encoding, "lcm");
         assert_eq!(*schema, None);
         assert_eq!(data, &vec![7u8; 16]);
+
+        let (encoding, schema, data) = &seen["/garbled"];
+        assert_eq!(encoding, "lcm");
+        assert_eq!(*schema, None);
+        assert_eq!(data, &vec![9u8; 16]);
 
         std::fs::remove_dir_all(&directory).unwrap();
     }
