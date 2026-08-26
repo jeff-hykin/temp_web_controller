@@ -133,7 +133,19 @@ fn read_header(reader: &mut Reader) -> Result<Header> {
     })
 }
 
-pub fn decode_image(payload: &[u8]) -> Result<ImageMessage> {
+/// A `RawImage` whose pixels are still borrowed, so the per-frame health check can
+/// look at the shape of a megabyte without copying it.
+pub struct RawImageParts<'a> {
+    pub header: Header,
+    pub width: usize,
+    pub height: usize,
+    pub step: usize,
+    pub is_bigendian: u8,
+    pub encoding: String,
+    pub data: &'a [u8],
+}
+
+pub fn read_raw_image(payload: &[u8]) -> Result<RawImageParts<'_>> {
     let mut reader = Reader::new(payload);
     reader.expect_fingerprint(&IMAGE_FINGERPRINT)?;
     let data_length = reader.i32()?;
@@ -146,15 +158,27 @@ pub fn decode_image(payload: &[u8]) -> Result<ImageMessage> {
     if data_length < 0 || height <= 0 || width <= 0 || step < 0 {
         bail!("nonsense image dimensions");
     }
-    let data = reader.take(data_length as usize)?.to_vec();
-    Ok(ImageMessage::Raw(RawImage {
+    Ok(RawImageParts {
         header,
         width: width as usize,
         height: height as usize,
         step: step as usize,
         is_bigendian,
         encoding,
-        data,
+        data: reader.take(data_length as usize)?,
+    })
+}
+
+pub fn decode_image(payload: &[u8]) -> Result<ImageMessage> {
+    let parts = read_raw_image(payload)?;
+    Ok(ImageMessage::Raw(RawImage {
+        header: parts.header,
+        width: parts.width,
+        height: parts.height,
+        step: parts.step,
+        is_bigendian: parts.is_bigendian,
+        encoding: parts.encoding,
+        data: parts.data.to_vec(),
     }))
 }
 

@@ -503,7 +503,12 @@ function renderTopics(topics) {
         row.update = (topic) => {
             row.classList.toggle("stale", topic.seconds_since_seen > 5)
             setText(name, topic.topic)
-            setText(type, topic.msg_type ?? "?")
+            // A frame we could not classify is still recorded, so the count is the
+            // only place the defect shows up before someone opens the file.
+            setText(type, topic.unclassifiable
+                ? `${topic.msg_type ?? "?"} · ${topic.unclassifiable} unreadable`
+                : topic.msg_type ?? "?")
+            type.classList.toggle("bad", topic.unclassifiable > 0)
             setText(rate, `${topic.rate.toFixed(0)} hz`)
         }
         return row

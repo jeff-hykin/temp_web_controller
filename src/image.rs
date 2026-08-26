@@ -223,15 +223,25 @@ fn codec_of(data: &[u8]) -> Option<Codec> {
 /// dimos's `JpegLcmTransport` sends an ordinary `sensor_msgs/Image` whose `data`
 /// is a whole compressed stream and whose `step` is 0, so the label is the only
 /// hint that the payload is not pixels.
+/// A conformant raw frame fills exactly `height * step` bytes and a codec stream
+/// essentially never does, so this settles the question structurally. Magic bytes
+/// alone would not: a bright mono8 row can genuinely open with ff d8 ff.
+pub fn looks_like_pixels(height: usize, step: usize, length: usize) -> bool {
+    step != 0 && height.checked_mul(step) == Some(length)
+}
+
+/// Neither the right size for its own dimensions nor a container we recognise, so
+/// the frame is truncated, mis-measured, or in a codec we do not sniff. Counted
+/// rather than logged per frame, since at 60 Hz a warn line would be unreadable.
+pub fn frame_is_unclassifiable(height: usize, step: usize, data: &[u8]) -> bool {
+    !looks_like_pixels(height, step, data.len()) && codec_of(data).is_none()
+}
+
 fn compressed_codec(image: &RawImage) -> Option<Codec> {
     if !matches!(image.encoding.as_str(), "jpeg" | "jpg" | "png") {
         return None;
     }
-    // A conformant raw frame fills exactly `height * step` bytes and a codec stream
-    // essentially never does, so this settles the question structurally. Magic bytes
-    // alone would not: a bright mono8 row can genuinely open with ff d8 ff.
-    let raw_size = image.height.checked_mul(image.step);
-    if image.step != 0 && raw_size == Some(image.data.len()) {
+    if looks_like_pixels(image.height, image.step, image.data.len()) {
         return None;
     }
     codec_of(&image.data)

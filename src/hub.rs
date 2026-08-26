@@ -99,6 +99,7 @@ struct TopicRecord {
     rate: f64,
     bytes_per_second: f64,
     last_seen: Instant,
+    unclassifiable: u64,
 }
 
 #[derive(Serialize)]
@@ -113,6 +114,7 @@ pub struct TopicView {
     pub seconds_since_seen: f64,
     pub recorded: bool,
     pub is_rpc: bool,
+    pub unclassifiable: u64,
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -363,7 +365,7 @@ impl Hub {
 
     pub fn record_skipped(&self, transport: Transport, channel: &str, bytes: usize) {
         let (topic, msg_type) = parse_lcm_channel(channel);
-        self.touch(transport, topic, msg_type, bytes);
+        self.touch(transport, topic, msg_type, bytes, false);
     }
 
     pub fn on_lcm_message(&self, channel: &str, payload: &[u8]) {
@@ -384,7 +386,30 @@ impl Hub {
         payload: &[u8],
     ) {
         let is_image = msg_type.as_deref().is_some_and(msgs::is_image_type);
-        self.touch(transport, topic.clone(), msg_type.clone(), payload.len());
+        let parts = match msg_type.as_deref() {
+            Some(msgs::IMAGE_TYPE) => msgs::read_raw_image(payload).ok(),
+            _ => None,
+        };
+        let unclassifiable = parts.as_ref().is_some_and(|parts| {
+            image::frame_is_unclassifiable(parts.height, parts.step, parts.data)
+        });
+        let first_bad_frame = self.touch(
+            transport,
+            topic.clone(),
+            msg_type.clone(),
+            payload.len(),
+            unclassifiable,
+        );
+        if let (true, Some(parts)) = (first_bad_frame, &parts) {
+            eprintln!(
+                "{topic}: image frame is neither {}x{} pixels nor a container we recognise \
+                 (encoding {:?}, {} bytes); recording it as-is",
+                parts.height,
+                parts.step,
+                parts.encoding,
+                parts.data.len()
+            );
+        }
         if msg_type.as_deref() == Some(msgs::TF_TYPE) {
             self.record_tf(&topic, payload);
         }
@@ -537,7 +562,8 @@ impl Hub {
         topic: String,
         msg_type: Option<String>,
         bytes: usize,
-    ) {
+        unclassifiable: bool,
+    ) -> bool {
         let mut topics = self.topics.lock().unwrap();
         let record = topics.entry(topic).or_insert_with(|| TopicRecord {
             msg_type: msg_type.clone(),
@@ -548,7 +574,10 @@ impl Hub {
             rate: 0.0,
             bytes_per_second: 0.0,
             last_seen: Instant::now(),
+            unclassifiable: 0,
         });
+        let first_bad_frame = unclassifiable && record.unclassifiable == 0;
+        record.unclassifiable += unclassifiable as u64;
         if record.msg_type.is_none() {
             record.msg_type = msg_type;
         }
@@ -557,6 +586,7 @@ impl Hub {
         record.window_messages += 1;
         record.window_bytes += bytes as u64;
         record.last_seen = Instant::now();
+        first_bad_frame
     }
 
     pub fn tick_rates(&self, elapsed: Duration) {
@@ -585,6 +615,7 @@ impl Hub {
                 seconds_since_seen: record.last_seen.elapsed().as_secs_f64(),
                 recorded: self.is_topic_recorded(topic),
                 is_rpc: is_rpc_topic(topic),
+                unclassifiable: record.unclassifiable,
             })
             .collect();
         views.sort_by(|left, right| {
@@ -986,6 +1017,44 @@ mod tests {
             }
             payload.extend_from_slice(&[0u8; 56]);
         }
+        payload
+    }
+
+    /// A frame that is neither the right size for its own dimensions nor a
+    /// container we know is still recorded, so this counter is the only place the
+    /// defect is visible before someone opens the file.
+    #[test]
+    fn frames_that_cannot_be_classified_are_counted_per_topic() {
+        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let channel = "/cam#sensor_msgs.Image";
+        // 4 rows of step 12 want 48 bytes and only 12 arrive, with nothing
+        // recognisable at the front: a truncated frame or a codec we do not sniff.
+        let truncated = image_payload(4, 4, 12, "rgb8", &[3u8; 12]);
+        hub.on_lcm_message(channel, &truncated);
+        hub.on_lcm_message(channel, &truncated);
+        // A conformant frame of the same shape must not be counted.
+        hub.on_lcm_message(channel, &image_payload(4, 4, 12, "rgb8", &[3u8; 48]));
+        let views = hub.topic_views();
+        assert_eq!(views.len(), 1);
+        assert_eq!(views[0].unclassifiable, 2);
+        assert_eq!(views[0].messages, 3);
+    }
+
+    fn image_payload(width: i32, height: i32, step: i32, encoding: &str, data: &[u8]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&msgs::IMAGE_FINGERPRINT);
+        payload.extend_from_slice(&(data.len() as i32).to_be_bytes());
+        payload.extend_from_slice(&[0u8; 12]);
+        payload.extend_from_slice(&1u32.to_be_bytes());
+        payload.push(0);
+        payload.extend_from_slice(&height.to_be_bytes());
+        payload.extend_from_slice(&width.to_be_bytes());
+        payload.extend_from_slice(&((encoding.len() + 1) as u32).to_be_bytes());
+        payload.extend_from_slice(encoding.as_bytes());
+        payload.push(0);
+        payload.push(0);
+        payload.extend_from_slice(&step.to_be_bytes());
+        payload.extend_from_slice(data);
         payload
     }
 

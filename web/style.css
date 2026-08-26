@@ -580,6 +580,10 @@ input[type="range"] {
     color: var(--faint);
 }
 
+.topic-row .type.bad {
+    color: var(--bad);
+}
+
 .topic-row.stale {
     opacity: 0.4;
 }
