@@ -22,6 +22,7 @@ socket2 = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 zenoh = { version = "1", features = ["unstable"] }
 zune-core = "0.5.3"
+zune-jpeg = "0.5"
 zune-jpegxl = "0.5.2"
 
 [profile.release]

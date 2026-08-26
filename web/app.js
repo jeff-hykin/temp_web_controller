@@ -516,11 +516,15 @@ function renderTileStats(streams) {
         if (!stats) {
             continue
         }
-        const size = stats.passthrough ? "jpeg" : `${stats.width}x${stats.height} q${stats.quality}`
+        // Quality is ours to report only when we did the encoding; a passed-through
+        // frame carries whatever the publisher chose.
+        const size = stats.passthrough
+            ? `${stats.width}x${stats.height} as sent`
+            : `${stats.width}x${stats.height} q${stats.quality}`
         const kilobytes = (stats.jpeg_bytes / 1024).toFixed(0)
-        tile.info.textContent = stats.error
+        setText(tile.info, stats.error
             ? stats.error
-            : `${stats.stream_fps.toFixed(0)}/${stats.source_fps.toFixed(0)} fps · ${size} · ${kilobytes} KB`
+            : `${stats.stream_fps.toFixed(0)}/${stats.source_fps.toFixed(0)} fps · ${size} · ${kilobytes} KB`)
     }
 }
 

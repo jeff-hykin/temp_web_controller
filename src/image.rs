@@ -1,14 +1,17 @@
-use crate::msgs::{CompressedImage, RawImage};
-use anyhow::{bail, Result};
+use crate::msgs::{CompressedImage, Header, RawImage};
+use anyhow::{anyhow, bail, Context, Result};
 use bytes::Bytes;
 use jpeg_encoder::{ColorType, Encoder};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::io::Cursor;
 
 pub struct EncodedFrame {
     pub jpeg: Bytes,
     pub width: usize,
     pub height: usize,
+    /// True when the browser is getting the publisher's own bytes rather than ours.
+    pub passthrough: bool,
 }
 
 /// Recorded frames are archival, so this sits far above the streaming quality.
@@ -197,12 +200,117 @@ enum Pixels {
     Rgb,
 }
 
+const PNG_MAGIC: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Codec {
+    Jpeg,
+    Png,
+}
+
+/// Sniffed rather than taken from the `format` or `encoding` string, because those
+/// are free text and a mislabelled payload should be rejected, not served broken.
+fn codec_of(data: &[u8]) -> Option<Codec> {
+    if data.starts_with(&[0xFF, 0xD8]) {
+        Some(Codec::Jpeg)
+    } else if data.starts_with(&PNG_MAGIC) {
+        Some(Codec::Png)
+    } else {
+        None
+    }
+}
+
 /// dimos's `JpegLcmTransport` sends an ordinary `sensor_msgs/Image` whose `data`
-/// is already a JFIF stream and whose `step` is 0. Those bytes go straight to the
-/// browser, which skips a decode and a re-encode per frame per viewer. The SOI
-/// check keeps a mislabelled payload from being served as a broken image.
-fn is_jpeg_payload(image: &RawImage) -> bool {
-    matches!(image.encoding.as_str(), "jpeg" | "jpg") && image.data.starts_with(&[0xFF, 0xD8])
+/// is a whole compressed stream and whose `step` is 0, so the label is the only
+/// hint that the payload is not pixels.
+fn compressed_codec(image: &RawImage) -> Option<Codec> {
+    if !matches!(image.encoding.as_str(), "jpeg" | "jpg" | "png") {
+        return None;
+    }
+    codec_of(&image.data)
+}
+
+fn decode_jpeg(data: &[u8]) -> Result<RawImage> {
+    let mut decoder = zune_jpeg::JpegDecoder::new(Cursor::new(data));
+    let pixels = decoder
+        .decode()
+        .map_err(|error| anyhow!("jpeg decode failed: {error}"))?;
+    let (width, height) = decoder.dimensions().context("jpeg carries no frame header")?;
+    let encoding = match decoder.output_colorspace() {
+        Some(zune_core::colorspace::ColorSpace::Luma) => "mono8",
+        Some(zune_core::colorspace::ColorSpace::RGB) => "rgb8",
+        other => bail!("unsupported jpeg colorspace: {other:?}"),
+    };
+    Ok(decoded_image(width, height, encoding, pixels))
+}
+
+fn decode_png(data: &[u8]) -> Result<RawImage> {
+    let mut decoder = png::Decoder::new(Cursor::new(data));
+    // Turns a palette or a sub-byte bit depth into plain 8-bit samples, so the
+    // match below only has to cover the layouts the raw path already knows.
+    decoder.set_transformations(png::Transformations::EXPAND);
+    let mut reader = decoder.read_info()?;
+    let size = reader
+        .output_buffer_size()
+        .context("png dimensions overflow a buffer")?;
+    let mut pixels = vec![0u8; size];
+    let info = reader.next_frame(&mut pixels)?;
+    pixels.truncate(info.buffer_size());
+    let encoding = match (info.color_type, info.bit_depth) {
+        (png::ColorType::Grayscale, png::BitDepth::Eight) => "mono8",
+        (png::ColorType::Rgb, png::BitDepth::Eight) => "rgb8",
+        (png::ColorType::Rgba, png::BitDepth::Eight) => "rgba8",
+        (png::ColorType::Grayscale, png::BitDepth::Sixteen) => {
+            // png always stores 16-bit samples big-endian, and `is_bigendian` is
+            // set below rather than swapping a depth frame's worth of bytes here.
+            return Ok(RawImage {
+                is_bigendian: 1,
+                ..decoded_image(info.width as usize, info.height as usize, "mono16", pixels)
+            });
+        }
+        (color, depth) => bail!("unsupported png layout: {color:?} at {depth:?} bits"),
+    };
+    Ok(decoded_image(
+        info.width as usize,
+        info.height as usize,
+        encoding,
+        pixels,
+    ))
+}
+
+fn decoded_image(width: usize, height: usize, encoding: &str, data: Vec<u8>) -> RawImage {
+    RawImage {
+        header: Header {
+            stamp_sec: 0,
+            stamp_nsec: 0,
+            frame_id: String::new(),
+        },
+        width,
+        height,
+        step: 0,
+        is_bigendian: 0,
+        encoding: encoding.to_owned(),
+        data,
+    }
+}
+
+/// Reads just the header, so deciding whether a frame needs resizing costs a few
+/// microseconds instead of a full decode.
+fn compressed_size(codec: Codec, data: &[u8]) -> Result<(usize, usize)> {
+    match codec {
+        Codec::Jpeg => {
+            let mut decoder = zune_jpeg::JpegDecoder::new(Cursor::new(data));
+            decoder
+                .decode_headers()
+                .map_err(|error| anyhow!("jpeg header unreadable: {error}"))?;
+            decoder.dimensions().context("jpeg carries no frame header")
+        }
+        Codec::Png => {
+            let reader = png::Decoder::new(Cursor::new(data)).read_info()?;
+            let info = reader.info();
+            Ok((info.width as usize, info.height as usize))
+        }
+    }
 }
 
 fn kind_of(encoding: &str) -> Option<(Pixels, usize, bool)> {
@@ -224,13 +332,51 @@ fn kind_of(encoding: &str) -> Option<(Pixels, usize, bool)> {
 /// Sampling is nearest neighbour: at the frame rates this streams, a cheap
 /// resample that keeps up beats a pretty one that forces frames to be dropped.
 pub fn encode(image: &RawImage, quality: u8, max_width: usize) -> Result<EncodedFrame> {
-    if is_jpeg_payload(image) {
+    match compressed_codec(image) {
+        Some(codec) => encode_payload(codec, &image.data, quality, max_width),
+        None => encode_raw(image, quality, max_width),
+    }
+}
+
+/// A `sensor_msgs/CompressedImage`, whose whole point is that `data` is a codec
+/// stream. The `format` field is ignored in favour of the magic bytes.
+pub fn encode_compressed(
+    image: &CompressedImage,
+    quality: u8,
+    max_width: usize,
+) -> Result<EncodedFrame> {
+    let Some(codec) = codec_of(&image.data) else {
+        bail!("compressed format {} is not viewable", image.format);
+    };
+    encode_payload(codec, &image.data, quality, max_width)
+}
+
+/// A jpeg that already fits goes to the browser untouched, skipping a decode and a
+/// re-encode per frame per viewer. Everything else is decoded to pixels and run
+/// through the ordinary path, which is what makes png and oversized jpeg viewable.
+fn encode_payload(
+    codec: Codec,
+    data: &[u8],
+    quality: u8,
+    max_width: usize,
+) -> Result<EncodedFrame> {
+    let (width, height) = compressed_size(codec, data)?;
+    if codec == Codec::Jpeg && (max_width == 0 || width <= max_width) {
         return Ok(EncodedFrame {
-            jpeg: Bytes::from(image.data.clone()),
-            width: image.width,
-            height: image.height,
+            jpeg: Bytes::copy_from_slice(data),
+            width,
+            height,
+            passthrough: true,
         });
     }
+    let decoded = match codec {
+        Codec::Jpeg => decode_jpeg(data)?,
+        Codec::Png => decode_png(data)?,
+    };
+    encode_raw(&decoded, quality, max_width)
+}
+
+fn encode_raw(image: &RawImage, quality: u8, max_width: usize) -> Result<EncodedFrame> {
     let Some((pixels, bytes_per_pixel, is_depth)) = kind_of(&image.encoding) else {
         bail!("unsupported image encoding: {}", image.encoding);
     };
@@ -290,6 +436,7 @@ pub fn encode(image: &RawImage, quality: u8, max_width: usize) -> Result<Encoded
         jpeg: Bytes::from(jpeg),
         width,
         height,
+        passthrough: false,
     })
 }
 
@@ -315,7 +462,12 @@ fn sample_depth(
             let source_column = x * image.width / width;
             let source = source_row * step + source_column * bytes_per_pixel;
             let value = if bytes_per_pixel == 2 {
-                let raw = u16::from_le_bytes([image.data[source], image.data[source + 1]]);
+                let pair = [image.data[source], image.data[source + 1]];
+                let raw = if image.is_bigendian != 0 {
+                    u16::from_be_bytes(pair)
+                } else {
+                    u16::from_le_bytes(pair)
+                };
                 if raw == 0 {
                     None
                 } else {
@@ -476,14 +628,81 @@ mod tests {
         }
     }
 
+    /// A plain Image whose data is a png stream, which is how frame-dumping tools
+    /// tend to publish.
+    fn prepng_image(width: usize, height: usize) -> RawImage {
+        let source = colour_image(width, height);
+        let compressed = compress(&source, ImageFormat::Png).unwrap();
+        RawImage {
+            step: 0,
+            encoding: "png".to_owned(),
+            data: compressed.data,
+            ..source
+        }
+    }
+
     #[test]
     fn already_jpeg_frames_are_passed_through_without_re_encoding() {
         let image = prejpeg_image(32, 24);
-        let frame = encode(&image, 40, 8).unwrap();
+        let frame = encode(&image, 40, 800).unwrap();
         assert_eq!(frame.jpeg.as_ref(), image.data.as_slice());
-        // Pass-through ignores quality and max_width, so the real dimensions
-        // must be reported or the browser scales the tile wrong.
+        assert!(frame.passthrough);
+        // Read back from the stream rather than the message header, which is the
+        // only field a `CompressedImage` does not carry at all.
         assert_eq!((frame.width, frame.height), (32, 24));
+    }
+
+    #[test]
+    fn a_jpeg_wider_than_the_viewer_asked_for_is_decoded_and_scaled() {
+        let image = prejpeg_image(32, 24);
+        let frame = encode(&image, 40, 8).unwrap();
+        assert_eq!((frame.width, frame.height), (8, 6));
+        assert!(!frame.passthrough);
+        assert_eq!(&frame.jpeg[..2], &[0xff, 0xd8]);
+    }
+
+    #[test]
+    fn png_frames_are_decoded_and_served_as_jpeg() {
+        let image = prepng_image(32, 24);
+        let frame = encode(&image, 75, 800).unwrap();
+        assert_eq!((frame.width, frame.height), (32, 24));
+        // png never passes through: the tiles are served as jpeg.
+        assert!(!frame.passthrough);
+        assert_eq!(&frame.jpeg[..2], &[0xff, 0xd8]);
+    }
+
+    #[test]
+    fn a_compressed_image_is_read_from_its_bytes_not_its_format_field() {
+        let png = prepng_image(24, 16);
+        let compressed = CompressedImage {
+            header: png.header.clone(),
+            format: "totally-wrong".to_owned(),
+            data: png.data.clone(),
+        };
+        let frame = encode_compressed(&compressed, 75, 800).unwrap();
+        assert_eq!((frame.width, frame.height), (24, 16));
+    }
+
+    #[test]
+    fn a_compressed_image_that_is_not_a_known_codec_is_rejected() {
+        let compressed = CompressedImage {
+            header: crate::msgs::Header { stamp_sec: 0, stamp_nsec: 0, frame_id: String::new() },
+            format: "jpeg".to_owned(),
+            data: vec![0u8; 64],
+        };
+        assert!(encode_compressed(&compressed, 75, 800).is_err());
+    }
+
+    #[test]
+    fn a_sixteen_bit_depth_png_keeps_its_samples_through_the_decoder() {
+        let source = depth_image(9, 5);
+        let compressed = compress(&source, ImageFormat::Png).unwrap();
+        let decoded = decode_png(&compressed.data).unwrap();
+        assert_eq!(decoded.encoding, "mono16");
+        // png is big-endian on the wire, so a decoder that assumed the host order
+        // would return byte-swapped depths here rather than the originals.
+        assert_ne!(decoded.is_bigendian, 0);
+        assert_eq!(depths(&decoded), depths(&source));
     }
 
     #[test]

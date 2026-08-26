@@ -672,36 +672,20 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
         let decoded = msgs::decode_any_image(&pending.msg_type, &pending.payload);
         let outcome = match decoded {
             Ok(ImageMessage::Compressed(compressed)) => {
-                if compressed.format.contains("jpeg") || compressed.format.contains("jpg") {
-                    Ok((
-                        EncodedFrame {
-                            jpeg: bytes::Bytes::from(compressed.data),
-                            width: 0,
-                            height: 0,
-                        },
-                        true,
-                    ))
-                } else {
-                    Err(anyhow::anyhow!(
-                        "compressed format {} is not viewable",
-                        compressed.format
-                    ))
-                }
+                image::encode_compressed(&compressed, quality, max_width)
             }
-            Ok(ImageMessage::Raw(raw)) => {
-                image::encode(&raw, quality, max_width).map(|frame| (frame, false))
-            }
+            Ok(ImageMessage::Raw(raw)) => image::encode(&raw, quality, max_width),
             Err(error) => Err(error),
         };
 
         let mut stats = stream.stats.lock().unwrap();
         match outcome {
-            Ok((frame, passthrough)) => {
+            Ok(frame) => {
                 stats.encode_ms = started.elapsed().as_secs_f64() * 1000.0;
                 stats.jpeg_bytes = frame.jpeg.len();
                 stats.width = frame.width;
                 stats.height = frame.height;
-                stats.passthrough = passthrough;
+                stats.passthrough = frame.passthrough;
                 stats.quality = quality;
                 stats.max_width = max_width;
                 stats.error = None;
