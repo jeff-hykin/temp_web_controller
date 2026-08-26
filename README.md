@@ -97,7 +97,10 @@ are stored, so a topic seen for the first time is still recorded.
 
 Types the binary understands (`Image`, `CompressedImage`, `Twist`, `TFMessage`, `PointCloud2`,
 `Odometry`, `PoseStamped`, `Imu`, `CameraInfo`) are transcoded to ROS2 CDR with a schema, so the
-file opens in Foxglove directly. Anything else is stored as raw LCM bytes under a schema-less
+file opens in Foxglove directly. An `Image` that actually carries a jpeg or png stream — which
+is what dimos's `JpegLcmTransport` sends — is recorded as a `CompressedImage` instead, since an
+`Image` whose `encoding` names a codec is not something Foxglove's image panel will draw.
+Anything else is stored as raw LCM bytes under a schema-less
 channel tagged with its type name, so a recording is never silently incomplete.
 
 The panel also lists finished files with their size and age, a button that copies the absolute

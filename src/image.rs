@@ -227,7 +227,23 @@ fn compressed_codec(image: &RawImage) -> Option<Codec> {
     if !matches!(image.encoding.as_str(), "jpeg" | "jpg" | "png") {
         return None;
     }
+    // A conformant raw frame fills exactly `height * step` bytes and a codec stream
+    // essentially never does, so this settles the question structurally. Magic bytes
+    // alone would not: a bright mono8 row can genuinely open with ff d8 ff.
+    let raw_size = image.height.checked_mul(image.step);
+    if image.step != 0 && raw_size == Some(image.data.len()) {
+        return None;
+    }
     codec_of(&image.data)
+}
+
+/// The container name to record such a frame under, since writing it back out as
+/// an `Image` would claim a codec stream is a pixel layout and give it `step = 0`.
+pub fn container_format(image: &RawImage) -> Option<&'static str> {
+    match compressed_codec(image)? {
+        Codec::Jpeg => Some("jpeg"),
+        Codec::Png => Some("png"),
+    }
 }
 
 fn decode_jpeg(data: &[u8]) -> Result<RawImage> {

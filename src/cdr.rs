@@ -82,7 +82,14 @@ pub fn to_ros2(msg_type: &str, payload: &[u8]) -> Option<Encoded> {
 
 fn image(msg_type: &str, payload: &[u8]) -> Option<Encoded> {
     match msgs::decode_any_image(msg_type, payload).ok()? {
-        ImageMessage::Raw(image) => Some(raw_image(&image)),
+        ImageMessage::Raw(raw) => Some(match crate::image::container_format(&raw) {
+            Some(format) => compressed_image(&msgs::CompressedImage {
+                header: raw.header,
+                format: format.into(),
+                data: raw.data,
+            }),
+            None => raw_image(&raw),
+        }),
         ImageMessage::Compressed(image) => Some(compressed_image(&image)),
     }
 }
@@ -433,6 +440,63 @@ mod tests {
         assert_eq!(writer.buffer.len() - 4, 7);
         writer.u32(1);
         assert_eq!(writer.buffer.len() - 4, 12);
+    }
+
+    /// `JpegLcmTransport` sends a codec stream inside a `sensor_msgs.Image`, and
+    /// recording that verbatim gives Foxglove an Image whose `encoding` is not a
+    /// pixel layout, which its image panel refuses to draw.
+    #[test]
+    fn a_jpeg_carrying_image_is_recorded_as_a_compressed_image() {
+        let jpeg = [0xFFu8, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&msgs::IMAGE_FINGERPRINT);
+        payload.extend_from_slice(&(jpeg.len() as i32).to_be_bytes());
+        payload.extend_from_slice(&0i32.to_be_bytes());
+        payload.extend_from_slice(&3i32.to_be_bytes());
+        payload.extend_from_slice(&4i32.to_be_bytes());
+        payload.extend_from_slice(&7u32.to_be_bytes());
+        payload.extend_from_slice(b"camera\0");
+        payload.extend_from_slice(&480i32.to_be_bytes());
+        payload.extend_from_slice(&640i32.to_be_bytes());
+        payload.extend_from_slice(&5u32.to_be_bytes());
+        payload.extend_from_slice(b"jpeg\0");
+        payload.push(0);
+        payload.extend_from_slice(&0i32.to_be_bytes());
+        payload.extend_from_slice(&jpeg);
+
+        let encoded = to_ros2(msgs::IMAGE_TYPE, &payload).unwrap();
+        assert_eq!(encoded.schema_name, "sensor_msgs/msg/CompressedImage");
+        let body = &encoded.data[4..];
+        assert_eq!(&body[..4], &3i32.to_le_bytes());
+        // header, then "jpeg" as the format, then the bytes handed straight through.
+        let tail = &body[body.len() - jpeg.len()..];
+        assert_eq!(tail, &jpeg);
+        assert!(body.windows(5).any(|window| window == b"jpeg\0"));
+    }
+
+    /// A saturated mono8 row can genuinely start with the jpeg magic, so the size
+    /// invariant has to win over the sniff or a bright scene gets mislabelled.
+    #[test]
+    fn a_full_size_raw_frame_stays_an_image_despite_jpeg_magic() {
+        let pixels = [0xFFu8, 0xD8, 0xFF, 0x01, 0x02, 0x03];
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&msgs::IMAGE_FINGERPRINT);
+        payload.extend_from_slice(&(pixels.len() as i32).to_be_bytes());
+        payload.extend_from_slice(&0i32.to_be_bytes());
+        payload.extend_from_slice(&3i32.to_be_bytes());
+        payload.extend_from_slice(&4i32.to_be_bytes());
+        payload.extend_from_slice(&7u32.to_be_bytes());
+        payload.extend_from_slice(b"camera\0");
+        payload.extend_from_slice(&2i32.to_be_bytes());
+        payload.extend_from_slice(&1i32.to_be_bytes());
+        payload.extend_from_slice(&5u32.to_be_bytes());
+        payload.extend_from_slice(b"jpeg\0");
+        payload.push(0);
+        payload.extend_from_slice(&3i32.to_be_bytes());
+        payload.extend_from_slice(&pixels);
+
+        let encoded = to_ros2(msgs::IMAGE_TYPE, &payload).unwrap();
+        assert_eq!(encoded.schema_name, "sensor_msgs/msg/Image");
     }
 
     #[test]
