@@ -515,6 +515,11 @@ function renderTopics(topics) {
     })
 }
 
+/// Mirrors the thresholds the encoder degrades quality at, so the colour changes at
+/// the same moment the picture does.
+const LATENCY_GOOD_MS = 150
+const LATENCY_HIGH_MS = 300
+
 function renderTileStats(streams) {
     for (const [topic, tile] of state.tiles) {
         const stats = streams[topic]
@@ -530,6 +535,13 @@ function renderTileStats(streams) {
         setText(tile.info, stats.error
             ? stats.error
             : `${stats.stream_fps.toFixed(0)}/${stats.source_fps.toFixed(0)} fps · ${size} · ${kilobytes} KB`)
+        // Null means the publisher does not stamp its frames, which is not the same
+        // as zero latency, so the field is left blank rather than showing "0 ms".
+        const dropped = stats.late_dropped > 0 ? ` · ${stats.late_dropped} late` : ""
+        tile.latency.hidden = stats.latency_ms === null
+        setText(tile.latency, stats.latency_ms === null ? "" : `${stats.latency_ms.toFixed(0)} ms${dropped}`)
+        tile.latency.classList.toggle("bad", stats.latency_ms > LATENCY_HIGH_MS)
+        tile.latency.classList.toggle("warn", stats.latency_ms > LATENCY_GOOD_MS && stats.latency_ms <= LATENCY_HIGH_MS)
     }
 }
 
@@ -768,7 +780,8 @@ function openStream(topic) {
     name.textContent = topic
     const info = document.createElement("span")
     info.textContent = "connecting"
-    bar.append(name, info)
+    const latency = document.createElement("span")
+    bar.append(name, info, latency)
     root.append(canvas, bar)
     element("streams").append(root)
 
@@ -803,7 +816,7 @@ function openStream(topic) {
         }
     })
 
-    state.tiles.set(topic, { root, canvas, info, socket })
+    state.tiles.set(topic, { root, canvas, info, latency, socket })
 }
 
 function updateAxesFromKeys() {

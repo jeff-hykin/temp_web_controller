@@ -8,6 +8,7 @@
     --faint: rgba(235, 235, 245, 0.32);
     --accent: #0a84ff;
     --good: #32d74b;
+    --warn: #ff9f0a;
     --bad: #ff453a;
     --radius: 18px;
 }
@@ -170,6 +171,20 @@ main {
     color: var(--faint);
     font-variant-numeric: tabular-nums;
     border-top: 1px solid var(--hairline);
+}
+
+/* Keeps the stats and the latency together on the right, so the stats do not slide
+   to the middle of the bar on an unstamped stream where the latency is hidden. */
+.tile-bar span:first-of-type {
+    margin-left: auto;
+}
+
+.tile-bar .warn {
+    color: var(--warn);
+}
+
+.tile-bar .bad {
+    color: var(--bad);
 }
 
 .tile-bar strong {

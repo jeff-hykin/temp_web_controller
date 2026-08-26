@@ -7,12 +7,26 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
 
 const MIN_QUALITY: u8 = 25;
 const MAX_QUALITY: u8 = 85;
 const MIN_WIDTH: usize = 320;
+
+/// Latency budget, measured from the sender's own stamp to the moment we are about
+/// to encode, so it covers the robot's pipeline and any backlog of ours. Driving is
+/// comfortable under 150 ms, visibly laggy past 300, and a frame half a second old
+/// is no longer worth the CPU to encode.
+const LATENCY_GOOD_MS: f64 = 150.0;
+const LATENCY_HIGH_MS: f64 = 300.0;
+const LATENCY_DROP_MS: f64 = 500.0;
+/// Past this the sender's clock disagrees with ours rather than the link being slow,
+/// and a skewed clock must not be allowed to pin quality to the floor forever.
+const MAX_PLAUSIBLE_LATENCY_MS: f64 = 10_000.0;
+/// Dropping every late frame would leave a permanently black tile when the delay is
+/// upstream of us, so the view still refreshes even while it is behind.
+const MAX_CONSECUTIVE_LATE_DROPS: u32 = 4;
 
 const TF_STALE: Duration = Duration::from_secs(10);
 const TF_FORGET: Duration = Duration::from_secs(120);
@@ -129,6 +143,10 @@ pub struct StreamStats {
     pub width: usize,
     pub height: usize,
     pub passthrough: bool,
+    /// Age of the frame against the sender's clock. `None` when the publisher does
+    /// not stamp its frames or its clock disagrees with ours.
+    pub latency_ms: Option<f64>,
+    pub late_dropped: u64,
     pub error: Option<String>,
 }
 
@@ -678,7 +696,7 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
     let mut max_width = hub.settings().max_width;
     let mut window_start = Instant::now();
     let mut healthy_windows = 0;
-
+    let mut consecutive_late_drops = 0;
     loop {
         let pending = {
             let mut slot = stream.slot.lock().unwrap();
@@ -704,6 +722,33 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
 
         let started = Instant::now();
         let decoded = msgs::decode_any_image(&pending.msg_type, &pending.payload);
+        let latency_ms = decoded.as_ref().ok().and_then(frame_age_ms);
+
+        // Encoding a frame this old only pushes the next one further behind, so the
+        // backlog is thrown away rather than worked through. Unwinding the LCM
+        // message above is cheap; the scale and jpeg encode below are not.
+        let too_late = latency_ms.is_some_and(|age| age > LATENCY_DROP_MS)
+            && consecutive_late_drops < MAX_CONSECUTIVE_LATE_DROPS;
+        if too_late {
+            consecutive_late_drops += 1;
+            let mut stats = stream.stats.lock().unwrap();
+            stats.latency_ms = latency_ms;
+            stats.late_dropped += 1;
+            continue;
+        }
+        consecutive_late_drops = 0;
+
+        // A latency spike is answered on the frame that shows it rather than at the
+        // next one-second window, which is far too slow to catch up from.
+        if settings.auto_quality && latency_ms.is_some_and(|age| age > LATENCY_HIGH_MS) {
+            healthy_windows = 0;
+            if quality > MIN_QUALITY {
+                quality = quality.saturating_sub(20).max(MIN_QUALITY);
+            } else if max_width > MIN_WIDTH {
+                max_width = (max_width / 2).max(MIN_WIDTH);
+            }
+        }
+
         let outcome = match decoded {
             Ok(ImageMessage::Compressed(compressed)) => {
                 image::encode_compressed(&compressed, quality, max_width)
@@ -722,6 +767,7 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
                 stats.passthrough = frame.passthrough;
                 stats.quality = quality;
                 stats.max_width = max_width;
+                stats.latency_ms = latency_ms;
                 stats.error = None;
                 drop(stats);
                 stream.encoded.fetch_add(1, Ordering::Relaxed);
@@ -745,7 +791,11 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
             drop(stats);
 
             if hub.settings().auto_quality {
-                let keeping_up = arrived == 0 || encoded as f64 >= arrived as f64 * 0.9;
+                // Throughput alone would climb straight back into a latency spike,
+                // since a backlog can be drained at full rate and still be a second old.
+                let prompt = latency_ms.is_none_or(|age| age < LATENCY_GOOD_MS);
+                let keeping_up =
+                    prompt && (arrived == 0 || encoded as f64 >= arrived as f64 * 0.9);
                 if keeping_up {
                     healthy_windows += 1;
                     if healthy_windows >= 3 {
@@ -768,6 +818,23 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
             window_start = Instant::now();
         }
     }
+}
+
+/// How far behind the sender's own stamp this frame is. `None` when there is no
+/// usable stamp, which must not read as "zero latency": an unstamped publisher
+/// sends zeros, and a sender whose clock is ahead of ours produces a negative age.
+/// Both would otherwise drive the controller off a number that means nothing.
+fn frame_age_ms(message: &ImageMessage) -> Option<f64> {
+    let header = match message {
+        ImageMessage::Raw(image) => &image.header,
+        ImageMessage::Compressed(image) => &image.header,
+    };
+    if header.stamp_sec <= 0 || header.stamp_nsec < 0 {
+        return None;
+    }
+    let stamped = UNIX_EPOCH + Duration::new(header.stamp_sec as u64, header.stamp_nsec as u32);
+    let age = SystemTime::now().duration_since(stamped).ok()?.as_secs_f64() * 1000.0;
+    (age < MAX_PLAUSIBLE_LATENCY_MS).then_some(age)
 }
 
 pub fn normalize(topic: &str) -> String {
@@ -1038,6 +1105,33 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].unclassifiable, 2);
         assert_eq!(views[0].messages, 3);
+    }
+
+    /// Every one of these returns `None` rather than a number, because a bogus age
+    /// would be read as real latency and would pin the encoder's quality to the floor
+    /// for as long as the publisher kept sending.
+    #[test]
+    fn only_a_plausible_sender_stamp_produces_a_latency() {
+        let stamped = |stamp_sec: i32, stamp_nsec: i32| {
+            frame_age_ms(&ImageMessage::Raw(msgs::RawImage {
+                header: msgs::Header { stamp_sec, stamp_nsec, frame_id: String::new() },
+                width: 1,
+                height: 1,
+                step: 1,
+                is_bigendian: 0,
+                encoding: "mono8".into(),
+                data: vec![0],
+            }))
+        };
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let seconds = now.as_secs() as i32;
+        assert!(stamped(0, 0).is_none(), "an unstamped publisher must not read as zero latency");
+        assert!(stamped(-1, 0).is_none());
+        assert!(stamped(seconds, -1).is_none());
+        assert!(stamped(seconds + 60, 0).is_none(), "a sender clock ahead of ours is skew, not latency");
+        assert!(stamped(seconds - 3600, 0).is_none(), "an hour behind is skew, not a link we can recover");
+        let age = stamped(seconds - 1, now.subsec_nanos() as i32).expect("a one second old frame is plausible");
+        assert!((age - 1000.0).abs() < 100.0, "expected about 1000 ms, got {age}");
     }
 
     fn image_payload(width: i32, height: i32, step: i32, encoding: &str, data: &[u8]) -> Vec<u8> {
