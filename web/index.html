@@ -163,6 +163,11 @@
         <div class="group">
             <p class="group-title">File</p>
             <label class="row text">
+                <span>Save to</span>
+                <input type="text" id="record-dir" spellcheck="false" autocapitalize="off" autocomplete="off">
+            </label>
+            <p class="hint-text">Directory on the robot that mcap files are written to and listed from. It is created if missing; a path that cannot be written is refused and the old one stays.</p>
+            <label class="row text">
                 <span>Image format</span>
                 <select id="record-image-format">
                     <option value="raw">raw</option>

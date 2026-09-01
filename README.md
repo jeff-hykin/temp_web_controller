@@ -32,6 +32,7 @@ LCM uses `ttl=0` multicast, so this must run **on** the robot to see its traffic
 --linear-speed <M_PER_S>          [default: 0.25]
 --angular-speed <RAD_PER_S>       [default: 0.5]
 --record-dir <DIR>                where mcap recordings are written [default: recordings]
+                                  (also editable in the record panel)
 --launch-file <PATH>              saved launcher commands [default: ~/.dimos/temp_web_control.json]
 ```
 

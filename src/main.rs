@@ -146,9 +146,9 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("{} is not a usable topic name", args.topic))?,
             linear_speed: args.linear_speed,
             angular_speed: args.angular_speed,
+            record_dir,
             ..Settings::default()
         },
-        record_dir,
     );
 
     let lcm_url = lcm::parse_url(&args.lcm_url)?;

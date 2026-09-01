@@ -10,6 +10,7 @@ const state = {
     strafeMode: false,
     topics: [],
     lcmError: null,
+    shownRecordDir: null,
 }
 
 // The server re-sends every setting twice a second, and a status already in flight
@@ -94,6 +95,13 @@ function applyStatus(status) {
     target.classList.toggle("bad", Boolean(lcmError))
     if (lcmError) {
         target.textContent += ` — not hearing lcm: ${lcmError}`
+    }
+
+    // The saved-file list is a listing of whatever directory the server is
+    // recording into, so it goes stale the moment that directory changes.
+    if (state.shownRecordDir !== status.settings.record_dir) {
+        state.shownRecordDir = status.settings.record_dir
+        pollRecordings()
     }
 
     state.settings = withPendingSettings(status.settings)
@@ -1074,13 +1082,19 @@ function renderSettings(settings) {
     }
     element("quality").disabled = settings.auto_quality
 
+    // The writer is built when recording starts, so a mid-run change would
+    // silently not apply.
+    const recording = state.recording?.active === true
     for (const [id, key] of Object.entries(RECORD_SELECTS)) {
         const select = element(id)
         select.value = settings[key]
-        // The writer is built when recording starts, so a mid-run change would
-        // silently not apply.
-        select.disabled = state.recording?.active === true
+        select.disabled = recording
     }
+    const directory = element("record-dir")
+    if (document.activeElement !== directory) {
+        directory.value = settings.record_dir
+    }
+    directory.disabled = recording
 }
 
 function setupSettings() {
@@ -1112,6 +1126,15 @@ function setupSettings() {
             sendSetting(key, event.target.value)
         })
     }
+    const directory = element("record-dir")
+    directory.addEventListener("change", (event) => {
+        sendSetting("record_dir", event.target.value)
+    })
+    directory.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+            event.target.blur()
+        }
+    })
     const show = (open) => {
         element("settings").hidden = !open
         element("settings-scrim").hidden = !open

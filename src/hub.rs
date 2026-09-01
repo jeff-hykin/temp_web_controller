@@ -52,6 +52,7 @@ pub struct Settings {
     pub max_width: usize,
     pub record_compression: Compression,
     pub record_image_format: ImageFormat,
+    pub record_dir: PathBuf,
 }
 
 impl Default for Settings {
@@ -68,6 +69,7 @@ impl Default for Settings {
             max_width: 960,
             record_compression: Compression::default(),
             record_image_format: ImageFormat::default(),
+            record_dir: PathBuf::from("recordings"),
         }
     }
 }
@@ -85,6 +87,7 @@ pub struct SettingsPatch {
     pub max_width: Option<usize>,
     pub record_compression: Option<Compression>,
     pub record_image_format: Option<ImageFormat>,
+    pub record_dir: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -227,11 +230,10 @@ pub struct Hub {
     /// Only topics somebody actually toggled, so a topic that appears
     /// mid-recording still lands on its default rather than on a stale answer.
     recording_overrides: RwLock<HashMap<String, bool>>,
-    record_dir: PathBuf,
 }
 
 impl Hub {
-    pub fn new(settings: Settings, record_dir: PathBuf) -> Arc<Self> {
+    pub fn new(settings: Settings) -> Arc<Self> {
         Arc::new(Hub {
             topics: Mutex::new(HashMap::new()),
             streams: RwLock::new(HashMap::new()),
@@ -240,7 +242,6 @@ impl Hub {
             tf: Mutex::new(HashMap::new()),
             recorder: Mutex::new(None),
             recording_overrides: RwLock::new(HashMap::new()),
-            record_dir,
         })
     }
 
@@ -282,6 +283,9 @@ impl Hub {
         }
         if let Some(value) = patch.record_image_format {
             settings.record_image_format = value;
+        }
+        if let Some(value) = patch.record_dir.as_deref().and_then(record_directory) {
+            settings.record_dir = value;
         }
         settings.clone()
     }
@@ -358,12 +362,12 @@ impl Hub {
 
     pub fn start_recording(&self, name: Option<&str>) -> Result<RecordingStatus> {
         let name = name.map(str::to_string).unwrap_or_else(record::default_name);
-        let path = record::resolve(&self.record_dir, &name)?;
+        let settings = self.settings();
+        let path = record::resolve(&settings.record_dir, &name)?;
         let mut slot = self.recorder.lock().unwrap();
         if slot.is_some() {
             bail!("already recording");
         }
-        let settings = self.settings();
         let recorder =
             Recorder::start(&path, settings.record_compression, settings.record_image_format)?;
         let status = recorder.status();
@@ -372,11 +376,11 @@ impl Hub {
     }
 
     pub fn list_recordings(&self) -> Vec<record::RecordingFile> {
-        record::list(&self.record_dir)
+        record::list(&self.settings().record_dir)
     }
 
     pub fn delete_recording(&self, name: &str) -> Result<()> {
-        let path = record::resolve(&self.record_dir, name)?;
+        let path = record::resolve(&self.settings().record_dir, name)?;
         if self
             .recorder
             .lock()
@@ -959,6 +963,32 @@ pub fn is_rpc_topic(topic: &str) -> bool {
     topic.starts_with("rpc/") || topic.contains("/rpc/")
 }
 
+/// Resolves a recording directory typed into the record panel. The directory is
+/// created here rather than at `Recorder::start`, so a path that cannot be used
+/// is refused while the browser is still showing the field instead of failing
+/// later when somebody presses record. `None` keeps the current directory.
+pub fn record_directory(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let expanded = match trimmed.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(trimmed),
+    };
+    let absolute = match expanded.is_absolute() {
+        true => expanded,
+        false => std::env::current_dir().ok()?.join(expanded),
+    };
+    std::fs::create_dir_all(&absolute).ok()?;
+    // An existing but read-only directory passes create_dir_all, so prove a file
+    // can actually be written before accepting it.
+    let probe = absolute.join(".web_ctrl_write_test");
+    std::fs::write(&probe, b"").ok()?;
+    let _ = std::fs::remove_file(&probe);
+    Some(std::fs::canonicalize(&absolute).unwrap_or(absolute))
+}
+
 /// Cleans up a topic name typed into the settings drawer. `None` means the name
 /// is unusable and the current one should be kept, since a robot that quietly
 /// stops receiving commands is worse than one that ignores a typo. `#` is
@@ -995,7 +1025,7 @@ mod tests {
 
     #[test]
     fn rpc_topics_default_to_unrecorded_but_stay_overridable() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         assert!(!hub.is_topic_recorded("rpc/AlfredHighLevel/start/req"));
         assert!(!hub.is_topic_recorded("/alfred/rpc/CalibRecorder/build/res"));
         assert!(hub.is_topic_recorded("pointlio_odometry"));
@@ -1043,7 +1073,7 @@ mod tests {
         assert_eq!(command_topic("cmd vel"), None);
         assert_eq!(command_topic("cmd_vel#geometry_msgs.Twist"), None);
 
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.apply_settings(SettingsPatch {
             publish_topic: Some("alfred/cmd_vel".to_owned()),
             ..empty_patch()
@@ -1055,6 +1085,39 @@ mod tests {
             ..empty_patch()
         });
         assert_eq!(hub.settings().publish_topic, "/alfred/cmd_vel");
+    }
+
+    #[test]
+    fn a_recording_directory_is_created_and_an_unusable_one_is_refused() {
+        let root = std::env::temp_dir().join(format!("web_ctrl_record_dir_{}", std::process::id()));
+        let wanted = root.join("nested");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let hub = Hub::new(Settings::default());
+        hub.apply_settings(SettingsPatch {
+            record_dir: Some(wanted.to_string_lossy().into_owned()),
+            ..empty_patch()
+        });
+        let accepted = hub.settings().record_dir;
+        assert!(accepted.is_dir());
+        assert_eq!(accepted, std::fs::canonicalize(&wanted).unwrap());
+
+        // A path whose parent is a file cannot be created, so the old one stands.
+        let blocker = root.join("a_file");
+        std::fs::write(&blocker, b"").unwrap();
+        hub.apply_settings(SettingsPatch {
+            record_dir: Some(blocker.join("under").to_string_lossy().into_owned()),
+            ..empty_patch()
+        });
+        assert_eq!(hub.settings().record_dir, accepted);
+
+        hub.apply_settings(SettingsPatch {
+            record_dir: Some("   ".to_owned()),
+            ..empty_patch()
+        });
+        assert_eq!(hub.settings().record_dir, accepted);
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn empty_patch() -> SettingsPatch {
@@ -1070,12 +1133,13 @@ mod tests {
             max_width: None,
             record_compression: None,
             record_image_format: None,
+            record_dir: None,
         }
     }
 
     #[test]
     fn commands_scale_by_the_configured_speeds() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.set_command(Command {
             forward: 1.0,
             strafe: 0.0,
@@ -1091,7 +1155,7 @@ mod tests {
     /// the robot turns and strafes the opposite way from every other teleop source.
     #[test]
     fn screen_right_turns_and_strafes_right_in_rep_103() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.set_command(Command {
             forward: 0.0,
             strafe: 1.0,
@@ -1109,7 +1173,6 @@ mod tests {
                 deadman_ms: 100,
                 ..Settings::default()
             },
-            std::env::temp_dir(),
         );
         hub.set_command(Command {
             forward: 1.0,
@@ -1122,7 +1185,7 @@ mod tests {
 
     #[test]
     fn only_watched_image_topics_are_wanted() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         assert!(!hub.wants_payload("/image#sensor_msgs.Image"));
         let stream = hub.open_stream("/image");
         assert!(hub.wants_payload("/image#sensor_msgs.Image"));
@@ -1132,7 +1195,7 @@ mod tests {
 
     #[test]
     fn a_healthy_tf_tree_has_one_root_and_no_warnings() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("map", "odom"), ("odom", "base_link")]),
@@ -1145,7 +1208,7 @@ mod tests {
 
     #[test]
     fn a_child_with_two_parents_is_reported() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("map", "base_link"), ("odom", "base_link")]),
@@ -1159,7 +1222,7 @@ mod tests {
 
     #[test]
     fn disconnected_trees_are_reported() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("map", "base_link"), ("camera", "lens")]),
@@ -1171,7 +1234,7 @@ mod tests {
 
     #[test]
     fn a_cycle_is_reported() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.on_lcm_message(
             "/tf#tf2_msgs.TFMessage",
             &tf_payload(&[("a", "b"), ("b", "c"), ("c", "a")]),
@@ -1202,7 +1265,7 @@ mod tests {
     /// defect is visible before someone opens the file.
     #[test]
     fn frames_that_cannot_be_classified_are_counted_per_topic() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         let channel = "/cam#sensor_msgs.Image";
         // 4 rows of step 12 want 48 bytes and only 12 arrive, with nothing
         // recognisable at the front: a truncated frame or a codec we do not sniff.
@@ -1264,7 +1327,7 @@ mod tests {
 
     #[test]
     fn discovery_records_topics_from_both_transports() {
-        let hub = Hub::new(Settings::default(), std::env::temp_dir());
+        let hub = Hub::new(Settings::default());
         hub.on_lcm_message("/odom#nav_msgs.Odometry", &[0; 32]);
         hub.on_zenoh_message("scan/sensor_msgs.LaserScan", &[0; 16]);
         hub.tick_rates(Duration::from_secs(1));
