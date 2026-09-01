@@ -135,6 +135,13 @@ pub struct TopicView {
 pub struct StreamStats {
     pub source_fps: f64,
     pub stream_fps: f64,
+    /// What one viewer's socket actually swallowed. A client on weak wifi sits far
+    /// below `stream_fps`, and that gap is invisible in every other number here.
+    pub client_fps: f64,
+    /// What the browser managed to draw, which it reports back because nothing on
+    /// this side can see a phone whose jpeg decoder is the bottleneck. `None` until
+    /// a viewer has said.
+    pub painted_fps: Option<f64>,
     pub dropped: u64,
     pub quality: u8,
     pub max_width: usize,
@@ -188,11 +195,21 @@ pub struct Stream {
     arrived: AtomicUsize,
     encoded: AtomicUsize,
     dropped: AtomicUsize,
+    delivered: AtomicUsize,
+    painted: Mutex<Option<(Instant, f64)>>,
 }
 
 impl Stream {
     pub fn subscribe(&self) -> watch::Receiver<Option<Arc<EncodedFrame>>> {
         self.frames.subscribe()
+    }
+
+    pub fn on_delivered(&self) {
+        self.delivered.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn report_painted(&self, fps: f64) {
+        *self.painted.lock().unwrap() = Some((Instant::now(), fps));
     }
 
     pub fn stats(&self) -> StreamStats {
@@ -670,6 +687,8 @@ impl Hub {
                     arrived: AtomicUsize::new(0),
                     encoded: AtomicUsize::new(0),
                     dropped: AtomicUsize::new(0),
+                    delivered: AtomicUsize::new(0),
+                    painted: Mutex::new(None),
                 })
             })
             .clone();
@@ -683,6 +702,12 @@ impl Hub {
                 .expect("failed to spawn encoder thread");
         }
         stream
+    }
+
+    pub fn report_painted(&self, topic: &str, fps: f64) {
+        if let Some(stream) = self.streams.read().unwrap().get(&normalize(topic)) {
+            stream.report_painted(fps);
+        }
     }
 
     pub fn close_stream(&self, stream: &Arc<Stream>) {
@@ -704,6 +729,12 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
                 if stream.viewers.load(Ordering::Relaxed) == 0 {
                     stream.running.store(false, Ordering::SeqCst);
                     return;
+                }
+                // Rates are rolled here as well as after a frame, or a publisher
+                // that stops leaves its last window standing and /api/status keeps
+                // reporting the fps it had when it died.
+                if window_start.elapsed() >= Duration::from_secs(1) {
+                    roll_window(&stream, &mut window_start);
                 }
                 let (guard, _) = stream
                     .ready
@@ -780,23 +811,16 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
         }
 
         if window_start.elapsed() >= Duration::from_secs(1) {
-            let elapsed = window_start.elapsed().as_secs_f64();
-            let arrived = stream.arrived.swap(0, Ordering::Relaxed);
-            let encoded = stream.encoded.swap(0, Ordering::Relaxed);
-            let dropped = stream.dropped.swap(0, Ordering::Relaxed) as u64;
-            let mut stats = stream.stats.lock().unwrap();
-            stats.source_fps = arrived as f64 / elapsed;
-            stats.stream_fps = encoded as f64 / elapsed;
-            stats.dropped += dropped;
-            drop(stats);
+            let window = roll_window(&stream, &mut window_start);
 
             if hub.settings().auto_quality {
                 // Throughput alone would climb straight back into a latency spike,
                 // since a backlog can be drained at full rate and still be a second old.
                 let prompt = latency_ms.is_none_or(|age| age < LATENCY_GOOD_MS);
-                let keeping_up =
-                    prompt && (arrived == 0 || encoded as f64 >= arrived as f64 * 0.9);
-                if keeping_up {
+                let encoding_keeps_up =
+                    prompt && (window.arrived == 0 || window.encoded as f64 >= window.arrived as f64 * 0.9);
+                let (viewer_share, limit) = window.viewer_shortfall();
+                if encoding_keeps_up && viewer_share >= VIEWER_TARGET_SHARE {
                     healthy_windows += 1;
                     if healthy_windows >= 3 {
                         healthy_windows = 0;
@@ -808,16 +832,102 @@ fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
                     }
                 } else {
                     healthy_windows = 0;
-                    if quality > MIN_QUALITY {
-                        quality = quality.saturating_sub(10).max(MIN_QUALITY);
-                    } else if max_width > MIN_WIDTH {
-                        max_width = (max_width / 2).max(MIN_WIDTH);
+                    // Cut in proportion to how far behind the viewer is: a browser
+                    // getting a fifth of the frames needs a step it can feel this
+                    // second, not six windows of shaving ten off the quality.
+                    let cut = (30.0 * (1.0 - viewer_share)).round().max(10.0) as u8;
+                    match limit {
+                        // The link cannot carry the bytes, so make them smaller.
+                        ViewerLimit::Link if quality > MIN_QUALITY => {
+                            quality = quality.saturating_sub(cut).max(MIN_QUALITY);
+                        }
+                        // Bytes arrive fine and the decoder is what cannot keep up,
+                        // so there are fewer pixels to spend, not fewer bits.
+                        ViewerLimit::Decode if max_width > MIN_WIDTH => {
+                            max_width = (max_width / 2).max(MIN_WIDTH);
+                        }
+                        _ if quality > MIN_QUALITY => {
+                            quality = quality.saturating_sub(cut).max(MIN_QUALITY);
+                        }
+                        _ => max_width = (max_width / 2).max(MIN_WIDTH),
                     }
                 }
             }
-            window_start = Instant::now();
         }
     }
+}
+
+/// How much of what we encode a viewer has to actually see before the stream counts
+/// as healthy. Below this the controller gives up quality to close the gap.
+const VIEWER_TARGET_SHARE: f64 = 0.9;
+const PAINTED_REPORT_STALE: Duration = Duration::from_secs(3);
+
+enum ViewerLimit {
+    Link,
+    Decode,
+    None,
+}
+
+struct Window {
+    arrived: usize,
+    encoded: usize,
+    delivered: usize,
+    painted_fps: Option<f64>,
+    elapsed: f64,
+}
+
+impl Window {
+    /// The fraction of encoded frames the viewer actually got, and which side of the
+    /// wire lost the rest.
+    fn viewer_shortfall(&self) -> (f64, ViewerLimit) {
+        if self.encoded == 0 {
+            return (1.0, ViewerLimit::None);
+        }
+        let encoded_fps = self.encoded as f64 / self.elapsed;
+        let delivered_fps = self.delivered as f64 / self.elapsed;
+        let seen_fps = match self.painted_fps {
+            Some(painted) => painted.min(delivered_fps),
+            None => delivered_fps,
+        };
+        let share = (seen_fps / encoded_fps).clamp(0.0, 1.0);
+        let limit = if share >= VIEWER_TARGET_SHARE {
+            ViewerLimit::None
+        } else if delivered_fps < encoded_fps * VIEWER_TARGET_SHARE {
+            ViewerLimit::Link
+        } else {
+            ViewerLimit::Decode
+        };
+        (share, limit)
+    }
+}
+
+/// Closes the one-second measurement window and publishes the rates. Called both
+/// after a frame and while idling, so a publisher that stops cannot leave its last
+/// window standing.
+fn roll_window(stream: &Stream, window_start: &mut Instant) -> Window {
+    let elapsed = window_start.elapsed().as_secs_f64();
+    let arrived = stream.arrived.swap(0, Ordering::Relaxed);
+    let encoded = stream.encoded.swap(0, Ordering::Relaxed);
+    let dropped = stream.dropped.swap(0, Ordering::Relaxed) as u64;
+    let viewers = stream.viewers.load(Ordering::Relaxed).max(1);
+    let delivered = stream.delivered.swap(0, Ordering::Relaxed) / viewers;
+    // A viewer that stopped reporting must stop steering the controller, or a tab
+    // that was closed mid-struggle pins the quality down for everyone after it.
+    let painted_fps = stream
+        .painted
+        .lock()
+        .unwrap()
+        .filter(|(at, _)| at.elapsed() < PAINTED_REPORT_STALE)
+        .map(|(_, fps)| fps);
+    let mut stats = stream.stats.lock().unwrap();
+    stats.source_fps = arrived as f64 / elapsed;
+    stats.stream_fps = encoded as f64 / elapsed;
+    stats.client_fps = delivered as f64 / elapsed;
+    stats.painted_fps = painted_fps;
+    stats.dropped += dropped;
+    drop(stats);
+    *window_start = Instant::now();
+    Window { arrived, encoded, delivered, painted_fps, elapsed }
 }
 
 /// How far behind the sender's own stamp this frame is. `None` when there is no

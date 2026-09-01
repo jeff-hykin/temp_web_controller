@@ -12,12 +12,56 @@ const state = {
     lcmError: null,
 }
 
+// The server re-sends every setting twice a second, and a status already in flight
+// still carries the value you just changed away from. Rendering it would drag the
+// control back under your finger. So a setting you changed wins until the server
+// echoes it back, and only then does the server become the source of truth again.
+const pendingSettings = new Map()
+// Some values are legitimately refused — an unusable publish topic leaves the old
+// one standing — and without a deadline the control would sit on a lie forever.
+const SETTING_ECHO_GRACE_MS = 2000
+
+function sendSetting(key, value) {
+    pendingSettings.set(key, { value, sentAt: performance.now() })
+    state.settings[key] = value
+    send({ type: "settings", [key]: value })
+}
+
+function withPendingSettings(settings) {
+    for (const [key, pending] of pendingSettings) {
+        if (settings[key] === pending.value || performance.now() - pending.sentAt > SETTING_ECHO_GRACE_MS) {
+            pendingSettings.delete(key)
+        } else {
+            settings[key] = pending.value
+        }
+    }
+    return settings
+}
+
 let control = null
+
+// Presses made while the link is down are held rather than dropped: a Stop Recording
+// that lands in the second between a dropped socket and its retry used to vanish with
+// no sign, which reads exactly like the button not working.
+const pendingCommands = []
+// Steering and painted-rate reports are resent continuously, so a held copy would only
+// replay a stale intent once the link came back.
+const TRANSIENT_COMMANDS = new Set(["cmd", "painted"])
 
 function connectControl() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:"
     control = new WebSocket(`${protocol}//${location.host}/ws`)
-    control.addEventListener("open", () => element("link-dot").classList.add("live"))
+    control.addEventListener("open", () => {
+        element("link-dot").classList.add("live")
+        while (pendingCommands.length > 0) {
+            control.send(JSON.stringify(pendingCommands.shift()))
+        }
+        // Those settings have only just been asked for, however long the link was
+        // down, so their echo deadline starts now.
+        for (const pending of pendingSettings.values()) {
+            pending.sentAt = performance.now()
+        }
+    })
     control.addEventListener("close", () => {
         element("link-dot").classList.remove("live")
         control = null
@@ -29,6 +73,8 @@ function connectControl() {
 function send(payload) {
     if (control && control.readyState === WebSocket.OPEN) {
         control.send(JSON.stringify(payload))
+    } else if (!TRANSIENT_COMMANDS.has(payload.type)) {
+        pendingCommands.push(payload)
     }
 }
 
@@ -50,13 +96,11 @@ function applyStatus(status) {
         target.textContent += ` — not hearing lcm: ${lcmError}`
     }
 
-    if (!state.settings || !state.editingSettings) {
-        state.settings = status.settings
-        renderSettings(status.settings)
-    }
+    state.settings = withPendingSettings(status.settings)
+    renderSettings(state.settings)
     renderCameras(status.topics)
     renderTopics(status.topics)
-    renderTileStats(status.streams)
+    renderTileStats(status.streams, status.topics)
     renderRecording(status.recording, status.topics)
     renderLauncher(status.launcher)
     renderValues()
@@ -520,9 +564,38 @@ function renderTopics(topics) {
 const LATENCY_GOOD_MS = 150
 const LATENCY_HIGH_MS = 300
 
-function renderTileStats(streams) {
+/// A frozen last frame reads exactly like a live one, so a feed that stopped is
+/// blanked rather than left showing whatever it was pointing at minutes ago. The
+/// window scales with the topic's own rate so a genuinely slow publisher does not
+/// blink offline between frames.
+const OFFLINE_FLOOR_MS = 3000
+
+function renderTileStats(streams, topics) {
+    const rates = new Map(topics.map((topic) => [topic.topic, topic.rate]))
     for (const [topic, tile] of state.tiles) {
+        // Only this side knows how many frames actually made it onto the canvas: a
+        // phone whose jpeg decoder is the bottleneck receives everything and draws
+        // a fraction of it, which looks identical to a healthy stream from the robot.
+        const since = performance.now() - tile.countedAt
+        if (since >= 1000) {
+            tile.paintedFps = tile.painted / (since / 1000)
+            send({ type: "painted", topic, fps: tile.paintedFps })
+            tile.painted = 0
+            tile.countedAt = performance.now()
+        }
         const stats = streams[topic]
+        const rate = rates.get(topic) ?? 0
+        const window = Math.max(OFFLINE_FLOOR_MS, rate > 0 ? 4000 / rate : 0)
+        const offline = tile.paintedAt === 0 || performance.now() - tile.paintedAt > window
+        tile.root.classList.toggle("offline", offline)
+        if (offline) {
+            if (tile.canvas.width > 0) {
+                tile.context.clearRect(0, 0, tile.canvas.width, tile.canvas.height)
+            }
+            tile.latency.hidden = true
+            setText(tile.info, tile.paintedAt === 0 ? "waiting for frames" : "offline")
+            continue
+        }
         if (!stats) {
             continue
         }
@@ -532,9 +605,11 @@ function renderTileStats(streams) {
             ? `${stats.width}x${stats.height} as sent`
             : `${stats.width}x${stats.height} q${stats.quality}`
         const kilobytes = (stats.jpeg_bytes / 1024).toFixed(0)
+        // The first number is what this browser drew, not what the robot encoded:
+        // a tile that says 29 fps while showing 5 is the bug this whole reading is for.
         setText(tile.info, stats.error
             ? stats.error
-            : `${stats.stream_fps.toFixed(0)}/${stats.source_fps.toFixed(0)} fps · ${size} · ${kilobytes} KB`)
+            : `${tile.paintedFps.toFixed(0)}/${stats.source_fps.toFixed(0)} fps · ${size} · ${kilobytes} KB`)
         // Null means the publisher does not stamp its frames, which is not the same
         // as zero latency, so the field is left blank rather than showing "0 ms".
         const dropped = stats.late_dropped > 0 ? ` · ${stats.late_dropped} late` : ""
@@ -759,9 +834,9 @@ function toggleStream(topic) {
         state.watching.delete(topic)
         const tile = state.tiles.get(topic)
         if (tile) {
-            tile.socket.close()
-            tile.root.remove()
             state.tiles.delete(topic)
+            tile.socket?.close()
+            tile.root.remove()
         }
     } else {
         state.watching.add(topic)
@@ -786,37 +861,65 @@ function openStream(topic) {
     element("streams").append(root)
 
     const context = canvas.getContext("2d")
+    const tile = { root, canvas, context, info, latency, socket: null, paintedAt: 0, painted: 0, paintedFps: 0, countedAt: performance.now() }
+    state.tiles.set(topic, tile)
+    connectStream(topic, tile)
+}
+
+/// The socket has to come back on its own: a phone that slept, a web_ctrl restart
+/// or a dropped wifi frame all close it, and until now that left the tile dead
+/// until someone reloaded the page.
+function connectStream(topic, tile) {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:"
     const socket = new WebSocket(`${protocol}//${location.host}/ws/stream/${topic}`)
     socket.binaryType = "arraybuffer"
+    tile.socket = socket
 
+    // One slot, newest wins. Dropping whatever arrives during a decode painted the
+    // *oldest* frame of a burst and threw away everything newer, so a link that
+    // delivers in bursts — which wifi does — showed a picture several frames stale.
+    let pending = null
     let decoding = false
-    socket.addEventListener("message", async (event) => {
-        // Skip arriving frames while one is still decoding: latest wins, always.
-        if (decoding || typeof event.data === "string") {
+    const drain = async () => {
+        if (decoding) {
             return
         }
         decoding = true
-        try {
-            const bitmap = await createImageBitmap(new Blob([event.data], { type: "image/jpeg" }))
-            if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-                canvas.width = bitmap.width
-                canvas.height = bitmap.height
+        while (pending) {
+            const data = pending
+            pending = null
+            try {
+                const bitmap = await createImageBitmap(new Blob([data], { type: "image/jpeg" }))
+                if (tile.canvas.width !== bitmap.width || tile.canvas.height !== bitmap.height) {
+                    tile.canvas.width = bitmap.width
+                    tile.canvas.height = bitmap.height
+                }
+                tile.context.drawImage(bitmap, 0, 0)
+                bitmap.close()
+                tile.paintedAt = performance.now()
+                tile.painted += 1
+            } catch (error) {
+                tile.info.textContent = `decode failed: ${error}`
             }
-            context.drawImage(bitmap, 0, 0)
-            bitmap.close()
-        } catch (error) {
-            info.textContent = `decode failed: ${error}`
         }
         decoding = false
+    }
+    socket.addEventListener("message", (event) => {
+        if (typeof event.data === "string") {
+            return
+        }
+        pending = event.data
+        drain()
     })
     socket.addEventListener("close", () => {
-        if (state.watching.has(topic)) {
-            info.textContent = "disconnected"
+        if (state.tiles.get(topic) === tile && state.watching.has(topic)) {
+            setTimeout(() => {
+                if (state.tiles.get(topic) === tile && state.watching.has(topic)) {
+                    connectStream(topic, tile)
+                }
+            }, 1000)
         }
     })
-
-    state.tiles.set(topic, { root, canvas, info, latency, socket })
 }
 
 function updateAxesFromKeys() {
@@ -963,10 +1066,8 @@ function renderSettings(settings) {
     }
     for (const [id, [key, format]] of Object.entries(SETTING_INPUTS)) {
         const input = element(id)
-        if (document.activeElement !== input) {
-            input.value = settings[key]
-        }
-        element(`label-${id}`).textContent = format(input.value)
+        input.value = settings[key]
+        setText(element(`label-${id}`), format(input.value))
     }
     for (const [id, key] of Object.entries(SETTING_TOGGLES)) {
         element(id).checked = settings[key]
@@ -987,7 +1088,7 @@ function setupSettings() {
     // becomes the topic the robot is being driven on.
     const topicInput = element("publish-topic")
     topicInput.addEventListener("change", (event) => {
-        send({ type: "settings", publish_topic: event.target.value })
+        sendSetting("publish_topic", event.target.value)
     })
     topicInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter") {
@@ -996,27 +1097,19 @@ function setupSettings() {
     })
     for (const [id, [key]] of Object.entries(SETTING_INPUTS)) {
         element(id).addEventListener("input", (event) => {
-            const value = Number(event.target.value)
-            state.settings[key] = value
-            state.editingSettings = true
+            sendSetting(key, Number(event.target.value))
             renderSettings(state.settings)
-            send({ type: "settings", [key]: value })
-        })
-        element(id).addEventListener("change", () => {
-            state.editingSettings = false
         })
     }
     for (const [id, key] of Object.entries(SETTING_TOGGLES)) {
         element(id).addEventListener("change", (event) => {
-            state.settings[key] = event.target.checked
+            sendSetting(key, event.target.checked)
             renderSettings(state.settings)
-            send({ type: "settings", [key]: event.target.checked })
         })
     }
     for (const [id, key] of Object.entries(RECORD_SELECTS)) {
         element(id).addEventListener("change", (event) => {
-            state.settings[key] = event.target.value
-            send({ type: "settings", [key]: event.target.value })
+            sendSetting(key, event.target.value)
         })
     }
     const show = (open) => {

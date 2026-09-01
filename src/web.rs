@@ -8,6 +8,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use axum::Router;
 use bytes::Bytes;
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -138,77 +139,96 @@ enum ClientMessage {
     LaunchDelete {
         name: String,
     },
+    Painted {
+        topic: String,
+        fps: f64,
+    },
 }
 
 async fn control_socket(upgrade: WebSocketUpgrade, State(state): State<AppState>) -> Response {
     upgrade.on_upgrade(move |socket| run_control_socket(socket, state))
 }
 
-async fn run_control_socket(mut socket: WebSocket, state: AppState) {
-    let mut status_timer = tokio::time::interval(Duration::from_millis(500));
+/// Reading and writing run as separate tasks. Sharing one loop meant a status
+/// payload that could not drain into a congested phone also held up everything the
+/// browser was trying to say — a Stop Recording press, or a stop command from the
+/// drive stick — until the send finally went through.
+async fn run_control_socket(socket: WebSocket, state: AppState) {
+    let (mut sink, mut stream) = socket.split();
+    let writer_state = state.clone();
+    let writer = tokio::spawn(async move {
+        let mut status_timer = tokio::time::interval(Duration::from_millis(500));
+        // A client that fell behind should get the next status, not a burst of the
+        // ones it missed, which would only push it further behind.
+        status_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            status_timer.tick().await;
+            let payload = status_payload(&writer_state).to_string();
+            if sink.send(Message::Text(payload.into())).await.is_err() {
+                break;
+            }
+        }
+    });
 
-    loop {
-        tokio::select! {
-            incoming = socket.recv() => {
-                let Some(Ok(message)) = incoming else {
-                    break;
-                };
-                let Message::Text(text) = message else {
-                    continue;
-                };
-                match serde_json::from_str::<ClientMessage>(&text) {
-                    Ok(ClientMessage::Cmd { forward, strafe, turn }) => {
-                        state.hub.set_command(Command { forward, strafe, turn });
-                    }
-                    Ok(ClientMessage::Settings(patch)) => {
-                        state.hub.apply_settings(patch);
-                    }
-                    Ok(ClientMessage::Record { path }) => {
-                        if let Err(error) = state.hub.start_recording(path.as_deref()) {
-                            eprintln!("could not start recording: {error}");
-                        }
-                    }
-                    Ok(ClientMessage::StopRecord) => {
-                        if let Err(error) = state.hub.stop_recording() {
-                            eprintln!("could not stop recording: {error}");
-                        }
-                    }
-                    Ok(ClientMessage::RecordTopic { topic, recorded }) => {
-                        state.hub.set_topic_recorded(&topic, recorded);
-                    }
-                    Ok(ClientMessage::LaunchRun { name }) => {
-                        if let Err(error) = state.launcher.run(&name) {
-                            state.launcher.note(error.to_string());
-                        }
-                    }
-                    Ok(ClientMessage::LaunchStop) => {
-                        if let Err(error) = state.launcher.stop() {
-                            state.launcher.note(error.to_string());
-                        }
-                    }
-                    Ok(ClientMessage::LaunchKill) => state.launcher.kill_blueprint(),
-                    Ok(ClientMessage::LaunchSave { name, command }) => {
-                        if let Err(error) = state.launcher.save_command(&name, &command) {
-                            state.launcher.note(error.to_string());
-                        }
-                    }
-                    Ok(ClientMessage::LaunchDelete { name }) => {
-                        if let Err(error) = state.launcher.delete_command(&name) {
-                            state.launcher.note(error.to_string());
-                        }
-                    }
-                    Err(error) => eprintln!("ignoring malformed control message: {error}"),
+    while let Some(Ok(message)) = stream.next().await {
+        let Message::Text(text) = message else {
+            continue;
+        };
+        match serde_json::from_str::<ClientMessage>(&text) {
+            Ok(ClientMessage::Cmd { forward, strafe, turn }) => {
+                state.hub.set_command(Command { forward, strafe, turn });
+            }
+            Ok(ClientMessage::Settings(patch)) => {
+                state.hub.apply_settings(patch);
+            }
+            Ok(ClientMessage::Record { path }) => {
+                if let Err(error) = state.hub.start_recording(path.as_deref()) {
+                    eprintln!("could not start recording: {error}");
                 }
             }
-            _ = status_timer.tick() => {
-                let payload = status_payload(&state).to_string();
-                if socket.send(Message::Text(payload.into())).await.is_err() {
-                    break;
+            Ok(ClientMessage::StopRecord) => {
+                // Finalising an mcap drains the writer queue and writes the index,
+                // which on a multi-gigabyte file takes long enough that doing it
+                // here would stall every command behind it, steering included.
+                let hub = Arc::clone(&state.hub);
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = hub.stop_recording() {
+                        eprintln!("could not stop recording: {error}");
+                    }
+                });
+            }
+            Ok(ClientMessage::RecordTopic { topic, recorded }) => {
+                state.hub.set_topic_recorded(&topic, recorded);
+            }
+            Ok(ClientMessage::LaunchRun { name }) => {
+                if let Err(error) = state.launcher.run(&name) {
+                    state.launcher.note(error.to_string());
                 }
             }
+            Ok(ClientMessage::LaunchStop) => {
+                if let Err(error) = state.launcher.stop() {
+                    state.launcher.note(error.to_string());
+                }
+            }
+            Ok(ClientMessage::LaunchKill) => state.launcher.kill_blueprint(),
+            Ok(ClientMessage::LaunchSave { name, command }) => {
+                if let Err(error) = state.launcher.save_command(&name, &command) {
+                    state.launcher.note(error.to_string());
+                }
+            }
+            Ok(ClientMessage::LaunchDelete { name }) => {
+                if let Err(error) = state.launcher.delete_command(&name) {
+                    state.launcher.note(error.to_string());
+                }
+            }
+            Ok(ClientMessage::Painted { topic, fps }) => {
+                state.hub.report_painted(&topic, fps);
+            }
+            Err(error) => eprintln!("ignoring malformed control message: {error}"),
         }
     }
 
+    writer.abort();
     state.hub.on_control_disconnect();
 }
 
@@ -248,6 +268,9 @@ async fn run_stream_socket(mut socket: WebSocket, topic: String, state: AppState
         if socket.send(Message::Binary(frame.jpeg.clone())).await.is_err() {
             break;
         }
+        // The send above blocks until the client's socket drains, so counting it
+        // here is the only place we learn what the viewer can actually take.
+        stream.on_delivered();
     }
 
     state.hub.close_stream(&stream);

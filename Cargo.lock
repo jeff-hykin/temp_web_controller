@@ -3985,6 +3985,7 @@ dependencies = [
  "axum",
  "bytes",
  "clap",
+ "futures-util",
  "image-webp",
  "jpeg-encoder",
  "jxl-oxide",

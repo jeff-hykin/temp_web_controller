@@ -161,6 +161,12 @@ main {
     display: block;
 }
 
+/* A cleared canvas is indistinguishable from a very dark scene, so the tile says
+   so in the bar as well as going black. */
+.tile.offline .tile-bar span:first-of-type {
+    color: var(--bad);
+}
+
 .tile-bar {
     display: flex;
     justify-content: space-between;
