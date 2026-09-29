@@ -1,7 +1,7 @@
 //! Re-encodes the handful of message types we understand into ROS2 CDR, so the
 //! recordings open in Foxglove instead of being an opaque pile of LCM bytes.
 
-use crate::msgs::{self, Header, ImageMessage};
+use crate::msgs::{self, Header, ImageMessage, Reader};
 
 /// Concatenated ros2msg text, which is what `message_encoding: "cdr"` readers
 /// expect. Note ROS2 headers have no `seq` field even though the LCM ones do.
@@ -76,6 +76,34 @@ pub fn to_ros2(msg_type: &str, payload: &[u8]) -> Option<Encoded> {
         msgs::POSE_STAMPED_TYPE => pose_stamped(payload),
         msgs::IMU_TYPE => imu(payload),
         msgs::CAMERA_INFO_TYPE => camera_info(payload),
+        "sensor_msgs.JointState" => joint_state(payload),
+        "sensor_msgs.Joy" => joy(payload),
+        "sensor_msgs.NavSatFix" => nav_sat_fix(payload),
+        "geometry_msgs.TwistStamped" => twist_stamped(payload),
+        "geometry_msgs.PointStamped" => point_stamped(payload),
+        "geometry_msgs.PoseWithCovarianceStamped" => pose_with_covariance_stamped(payload),
+        "nav_msgs.Path" => path(payload),
+        "nav_msgs.OccupancyGrid" => occupancy_grid(payload),
+        "std_msgs.Bool" => scalar(payload, &msgs::BOOL_FINGERPRINT, "Bool", "bool", |reader, writer| {
+            writer.boolean(reader.boolean()?);
+            Ok(())
+        }),
+        "std_msgs.String" => scalar(payload, &msgs::STRING_FINGERPRINT, "String", "string", |reader, writer| {
+            writer.string(&reader.string()?);
+            Ok(())
+        }),
+        "std_msgs.Float32" => scalar(payload, &msgs::FLOAT32_FINGERPRINT, "Float32", "float32", |reader, writer| {
+            writer.f32(reader.f32()?);
+            Ok(())
+        }),
+        "std_msgs.Float64" => scalar(payload, &msgs::FLOAT64_FINGERPRINT, "Float64", "float64", |reader, writer| {
+            writer.f64(reader.f64()?);
+            Ok(())
+        }),
+        "std_msgs.Int32" => scalar(payload, &msgs::INT32_FINGERPRINT, "Int32", "int32", |reader, writer| {
+            writer.i32(reader.i32()?);
+            Ok(())
+        }),
         _ => None,
     }
 }
@@ -339,6 +367,242 @@ fn camera_info(payload: &[u8]) -> Option<Encoded> {
     })
 }
 
+/// Reads the LCM fields and writes their CDR twins in one pass, for the types
+/// nothing else in the server needs to look inside.
+fn stream(
+    payload: &[u8],
+    fingerprint: &[u8; 8],
+    schema_name: &str,
+    schema_text: String,
+    body: impl FnOnce(&mut Reader, &mut CdrWriter) -> anyhow::Result<()>,
+) -> Option<Encoded> {
+    let mut reader = Reader::new(payload);
+    reader.expect_fingerprint(fingerprint).ok()?;
+    let mut writer = CdrWriter::new();
+    body(&mut reader, &mut writer).ok()?;
+    Some(Encoded {
+        schema_name: schema_name.into(),
+        schema_text,
+        data: writer.finish(),
+    })
+}
+
+fn scalar(
+    payload: &[u8],
+    fingerprint: &[u8; 8],
+    name: &str,
+    ros_type: &str,
+    body: impl FnOnce(&mut Reader, &mut CdrWriter) -> anyhow::Result<()>,
+) -> Option<Encoded> {
+    stream(payload, fingerprint, &format!("std_msgs/msg/{name}"), format!("{ros_type} data\n"), body)
+}
+
+fn copy_header(reader: &mut Reader, writer: &mut CdrWriter) -> anyhow::Result<()> {
+    write_header(writer, &msgs::read_header(reader)?);
+    Ok(())
+}
+
+fn copy_f64s(reader: &mut Reader, writer: &mut CdrWriter, count: usize) -> anyhow::Result<()> {
+    for _ in 0..count {
+        writer.f64(reader.f64()?);
+    }
+    Ok(())
+}
+
+fn joint_state(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::JOINT_STATE_FINGERPRINT,
+        "sensor_msgs/msg/JointState",
+        format!(
+            "std_msgs/Header header\n\
+             string[] name\n\
+             float64[] position\n\
+             float64[] velocity\n\
+             float64[] effort\n{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        |reader, writer| {
+            let name_length = reader.length()?;
+            let position_length = reader.length()?;
+            let velocity_length = reader.length()?;
+            let effort_length = reader.length()?;
+            copy_header(reader, writer)?;
+            writer.u32(name_length as u32);
+            for _ in 0..name_length {
+                writer.string(&reader.string()?);
+            }
+            for length in [position_length, velocity_length, effort_length] {
+                writer.u32(length as u32);
+                copy_f64s(reader, writer, length)?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn joy(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::JOY_FINGERPRINT,
+        "sensor_msgs/msg/Joy",
+        format!(
+            "std_msgs/Header header\n\
+             float32[] axes\n\
+             int32[] buttons\n{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        |reader, writer| {
+            let axes_length = reader.length()?;
+            let buttons_length = reader.length()?;
+            copy_header(reader, writer)?;
+            writer.u32(axes_length as u32);
+            for _ in 0..axes_length {
+                writer.f32(reader.f32()?);
+            }
+            writer.u32(buttons_length as u32);
+            for _ in 0..buttons_length {
+                writer.i32(reader.i32()?);
+            }
+            Ok(())
+        },
+    )
+}
+
+fn nav_sat_fix(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::NAV_SAT_FIX_FINGERPRINT,
+        "sensor_msgs/msg/NavSatFix",
+        format!(
+            "std_msgs/Header header\n\
+             sensor_msgs/NavSatStatus status\n\
+             float64 latitude\n\
+             float64 longitude\n\
+             float64 altitude\n\
+             float64[9] position_covariance\n\
+             uint8 position_covariance_type\n\n\
+             ================================================================================\n\
+             MSG: sensor_msgs/NavSatStatus\n\
+             int8 status\n\
+             uint16 service\n{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        |reader, writer| {
+            copy_header(reader, writer)?;
+            writer.u8(reader.i8()? as u8);
+            writer.u16(reader.i16()? as u16);
+            copy_f64s(reader, writer, 3 + 9)?;
+            writer.u8(reader.u8()?);
+            Ok(())
+        },
+    )
+}
+
+fn twist_stamped(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::TWIST_STAMPED_FINGERPRINT,
+        "geometry_msgs/msg/TwistStamped",
+        format!("std_msgs/Header header\ngeometry_msgs/Twist twist\n{TWIST_MSG}{VECTOR3_MSG}{HEADER_MSG}\n{TIME_MSG}"),
+        |reader, writer| {
+            copy_header(reader, writer)?;
+            copy_f64s(reader, writer, 6)
+        },
+    )
+}
+
+fn point_stamped(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::POINT_STAMPED_FINGERPRINT,
+        "geometry_msgs/msg/PointStamped",
+        format!("std_msgs/Header header\ngeometry_msgs/Point point\n{POINT_MSG}{HEADER_MSG}\n{TIME_MSG}"),
+        |reader, writer| {
+            copy_header(reader, writer)?;
+            copy_f64s(reader, writer, 3)
+        },
+    )
+}
+
+fn pose_with_covariance_stamped(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::POSE_WITH_COVARIANCE_STAMPED_FINGERPRINT,
+        "geometry_msgs/msg/PoseWithCovarianceStamped",
+        format!(
+            "std_msgs/Header header\n\
+             geometry_msgs/PoseWithCovariance pose\n\n\
+             ================================================================================\n\
+             MSG: geometry_msgs/PoseWithCovariance\n\
+             geometry_msgs/Pose pose\n\
+             float64[36] covariance\n\
+             {POSE_MSG}{POINT_MSG}{QUATERNION_MSG}{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        |reader, writer| {
+            copy_header(reader, writer)?;
+            copy_f64s(reader, writer, 7 + 36)
+        },
+    )
+}
+
+fn path(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::PATH_FINGERPRINT,
+        "nav_msgs/msg/Path",
+        format!(
+            "std_msgs/Header header\n\
+             geometry_msgs/PoseStamped[] poses\n\n\
+             ================================================================================\n\
+             MSG: geometry_msgs/PoseStamped\n\
+             std_msgs/Header header\n\
+             geometry_msgs/Pose pose\n\
+             {POSE_MSG}{POINT_MSG}{QUATERNION_MSG}{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        |reader, writer| {
+            let poses_length = reader.length()?;
+            copy_header(reader, writer)?;
+            writer.u32(poses_length as u32);
+            for _ in 0..poses_length {
+                copy_header(reader, writer)?;
+                copy_f64s(reader, writer, 7)?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn occupancy_grid(payload: &[u8]) -> Option<Encoded> {
+    stream(
+        payload,
+        &msgs::OCCUPANCY_GRID_FINGERPRINT,
+        "nav_msgs/msg/OccupancyGrid",
+        format!(
+            "std_msgs/Header header\n\
+             nav_msgs/MapMetaData info\n\
+             int8[] data\n\n\
+             ================================================================================\n\
+             MSG: nav_msgs/MapMetaData\n\
+             builtin_interfaces/Time map_load_time\n\
+             float32 resolution\n\
+             uint32 width\n\
+             uint32 height\n\
+             geometry_msgs/Pose origin\n\
+             {POSE_MSG}{POINT_MSG}{QUATERNION_MSG}{HEADER_MSG}\n{TIME_MSG}"
+        ),
+        |reader, writer| {
+            let data_length = reader.length()?;
+            copy_header(reader, writer)?;
+            writer.i32(reader.i32()?);
+            writer.u32(reader.i32()? as u32);
+            writer.f32(reader.f32()?);
+            writer.u32(reader.i32()? as u32);
+            writer.u32(reader.i32()? as u32);
+            copy_f64s(reader, writer, 7)?;
+            writer.bytes(reader.take(data_length)?);
+            Ok(())
+        },
+    )
+}
+
 fn write_pose(writer: &mut CdrWriter, pose: &msgs::Pose) {
     writer.f64_array(&pose.position);
     writer.f64_array(&pose.orientation);
@@ -374,12 +638,22 @@ impl CdrWriter {
         self.buffer.push(value);
     }
 
+    fn u16(&mut self, value: u16) {
+        self.align(2);
+        self.buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
     fn u32(&mut self, value: u32) {
         self.align(4);
         self.buffer.extend_from_slice(&value.to_le_bytes());
     }
 
     fn i32(&mut self, value: i32) {
+        self.align(4);
+        self.buffer.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn f32(&mut self, value: f32) {
         self.align(4);
         self.buffer.extend_from_slice(&value.to_le_bytes());
     }
@@ -534,5 +808,40 @@ mod tests {
         assert_eq!(&body[24..32], &20.0f64.to_le_bytes());
         assert_eq!(&body[72..80], &1.0f64.to_le_bytes());
         assert_eq!(body.len(), 80);
+    }
+
+    // Golden pairs: the LCM side from dimos_lcm's own encoder, the CDR side
+    // checked by decoding it with mcap_ros2 against the schema text we emit.
+    const JOINT_STATE_LCM: &str = "ccefa8a492b967e300000002000000020000000100000000000000030000001100000005000000026a000000000468697000000000036b6e003fe0000000000000bff40000000000004008000000000000";
+    const JOINT_STATE_CDR: &str = "000100001100000005000000020000006a000000020000000400000068697000030000006b6e000002000000000000000000e03f000000000000f4bf0100000000000000000000000000084000000000";
+    const NAV_SAT_FIX_LCM: &str = "cf889ff94755aa4e0000000300000011000000050000000467707300ff00054042d9999999999ac05e99999999999a402900000000000000000000000000003ff000000000000040000000000000004008000000000000401000000000000040140000000000004018000000000000401c000000000000402000000000000002";
+    const NAV_SAT_FIX_CDR: &str = "0001000011000000050000000400000067707300ff000500000000009a99999999d942409a99999999995ec000000000000029400000000000000000000000000000f03f000000000000004000000000000008400000000000001040000000000000144000000000000018400000000000001c40000000000000204002";
+    const PATH_LCM: &str = "c3ae62acb35793e200000002000000030000001100000005000000046d6170000000000300000011000000050000000261003ff000000000000040000000000000004008000000000000000000000000000000000000000000003fe33333333333333fe999999999999a0000000300000011000000050000000661626364650040260000000000004028000000000000402a000000000000000000000000000000000000000000003fe33333333333333fe999999999999a";
+    const PATH_CDR: &str = "000100001100000005000000040000006d617000020000001100000005000000020000006100000000000000000000000000f03f0000000000000040000000000000084000000000000000000000000000000000333333333333e33f9a9999999999e93f110000000500000006000000616263646500000000000000000000000000264000000000000028400000000000002a4000000000000000000000000000000000333333333333e33f9a9999999999e93f";
+
+    #[test]
+    fn streamed_types_match_the_golden_cdr() {
+        for (msg_type, lcm, cdr) in [
+            ("sensor_msgs.JointState", JOINT_STATE_LCM, JOINT_STATE_CDR),
+            ("sensor_msgs.NavSatFix", NAV_SAT_FIX_LCM, NAV_SAT_FIX_CDR),
+            ("nav_msgs.Path", PATH_LCM, PATH_CDR),
+        ] {
+            let encoded = to_ros2(msg_type, &unhex(lcm)).unwrap();
+            assert_eq!(hex(&encoded.data), cdr, "{msg_type}");
+        }
+    }
+
+    #[test]
+    fn a_truncated_streamed_type_declines() {
+        let full = unhex(JOINT_STATE_LCM);
+        assert!(to_ros2("sensor_msgs.JointState", &full[..full.len() - 1]).is_none());
+    }
+
+    fn unhex(text: &str) -> Vec<u8> {
+        (0..text.len()).step_by(2).map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap()).collect()
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 }

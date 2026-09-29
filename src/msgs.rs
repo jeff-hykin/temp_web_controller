@@ -22,22 +22,35 @@ pub const IMU_FINGERPRINT: [u8; 8] = [0x31, 0xab, 0x20, 0x5c, 0x8d, 0xd5, 0x7a, 
 pub const CAMERA_INFO_FINGERPRINT: [u8; 8] = [0xaf, 0xb5, 0x01, 0xb0, 0x07, 0x07, 0xa0, 0x2a];
 pub const ODOMETRY_FINGERPRINT: [u8; 8] = [0x94, 0xe1, 0x7f, 0x94, 0x64, 0x8c, 0xf0, 0xe4];
 pub const POSE_STAMPED_FINGERPRINT: [u8; 8] = [0x6a, 0x82, 0x69, 0x64, 0x58, 0xc2, 0x79, 0xa0];
+pub const JOINT_STATE_FINGERPRINT: [u8; 8] = [0xcc, 0xef, 0xa8, 0xa4, 0x92, 0xb9, 0x67, 0xe3];
+pub const JOY_FINGERPRINT: [u8; 8] = [0xa0, 0xf0, 0x7a, 0xbc, 0x86, 0xc1, 0x68, 0x4c];
+pub const TWIST_STAMPED_FINGERPRINT: [u8; 8] = [0x9c, 0xd2, 0xbc, 0xbe, 0x6c, 0xb2, 0xa7, 0xc0];
+pub const PATH_FINGERPRINT: [u8; 8] = [0xc3, 0xae, 0x62, 0xac, 0xb3, 0x57, 0x93, 0xe2];
+pub const OCCUPANCY_GRID_FINGERPRINT: [u8; 8] = [0xe7, 0xdf, 0xd1, 0x79, 0xcd, 0xfc, 0x3b, 0x65];
+pub const NAV_SAT_FIX_FINGERPRINT: [u8; 8] = [0xcf, 0x88, 0x9f, 0xf9, 0x47, 0x55, 0xaa, 0x4e];
+pub const POINT_STAMPED_FINGERPRINT: [u8; 8] = [0x9c, 0xd7, 0x64, 0x73, 0x8e, 0xa6, 0x29, 0xaf];
+pub const POSE_WITH_COVARIANCE_STAMPED_FINGERPRINT: [u8; 8] = [0xbe, 0x9e, 0x51, 0x6a, 0x53, 0x01, 0xb9, 0x69];
+pub const BOOL_FINGERPRINT: [u8; 8] = [0x1e, 0xbe, 0xf0, 0x6a, 0x50, 0x95, 0x0e, 0x3e];
+pub const STRING_FINGERPRINT: [u8; 8] = [0x21, 0xbf, 0x37, 0x09, 0x9b, 0x9d, 0x5e, 0x15];
+pub const FLOAT32_FINGERPRINT: [u8; 8] = [0x0a, 0xdc, 0x26, 0xb8, 0xf0, 0x54, 0x6d, 0xd3];
+pub const FLOAT64_FINGERPRINT: [u8; 8] = [0x21, 0xdd, 0x41, 0x03, 0xa9, 0xa1, 0x62, 0x15];
+pub const INT32_FINGERPRINT: [u8; 8] = [0x2c, 0xbc, 0xf9, 0xf7, 0xea, 0x91, 0x02, 0x3e];
 
 pub fn is_image_type(msg_type: &str) -> bool {
     msg_type == IMAGE_TYPE || msg_type == COMPRESSED_IMAGE_TYPE
 }
 
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     data: &'a [u8],
     offset: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(data: &'a [u8]) -> Self {
+    pub(crate) fn new(data: &'a [u8]) -> Self {
         Reader { data, offset: 0 }
     }
 
-    fn take(&mut self, count: usize) -> Result<&'a [u8]> {
+    pub(crate) fn take(&mut self, count: usize) -> Result<&'a [u8]> {
         if self.offset + count > self.data.len() {
             bail!("truncated message");
         }
@@ -46,28 +59,40 @@ impl<'a> Reader<'a> {
         Ok(slice)
     }
 
-    fn u8(&mut self) -> Result<u8> {
+    pub(crate) fn u8(&mut self) -> Result<u8> {
         Ok(self.take(1)?[0])
     }
 
-    fn i32(&mut self) -> Result<i32> {
+    pub(crate) fn i32(&mut self) -> Result<i32> {
         Ok(i32::from_be_bytes(self.take(4)?.try_into()?))
     }
 
-    fn u32(&mut self) -> Result<u32> {
+    pub(crate) fn i8(&mut self) -> Result<i8> {
+        Ok(self.u8()? as i8)
+    }
+
+    pub(crate) fn i16(&mut self) -> Result<i16> {
+        Ok(i16::from_be_bytes(self.take(2)?.try_into()?))
+    }
+
+    pub(crate) fn u32(&mut self) -> Result<u32> {
         Ok(u32::from_be_bytes(self.take(4)?.try_into()?))
     }
 
-    fn f64(&mut self) -> Result<f64> {
+    pub(crate) fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_be_bytes(self.take(4)?.try_into()?))
+    }
+
+    pub(crate) fn f64(&mut self) -> Result<f64> {
         Ok(f64::from_be_bytes(self.take(8)?.try_into()?))
     }
 
     /// LCM writes `boolean` as one byte.
-    fn boolean(&mut self) -> Result<bool> {
+    pub(crate) fn boolean(&mut self) -> Result<bool> {
         Ok(self.u8()? != 0)
     }
 
-    fn f64_array<const N: usize>(&mut self) -> Result<[f64; N]> {
+    pub(crate) fn f64_array<const N: usize>(&mut self) -> Result<[f64; N]> {
         let mut values = [0.0; N];
         for value in values.iter_mut() {
             *value = self.f64()?;
@@ -75,7 +100,16 @@ impl<'a> Reader<'a> {
         Ok(values)
     }
 
-    fn string(&mut self) -> Result<String> {
+    /// The `int32_t foo_length` fields LCM hoists to the front of a struct.
+    pub(crate) fn length(&mut self) -> Result<usize> {
+        let length = self.i32()?;
+        if length < 0 {
+            bail!("negative lcm array length");
+        }
+        Ok(length as usize)
+    }
+
+    pub(crate) fn string(&mut self) -> Result<String> {
         let length = self.u32()? as usize;
         if length == 0 {
             bail!("zero-length lcm string");
@@ -84,7 +118,7 @@ impl<'a> Reader<'a> {
         Ok(String::from_utf8_lossy(&raw[..length - 1]).into_owned())
     }
 
-    fn expect_fingerprint(&mut self, expected: &[u8; 8]) -> Result<()> {
+    pub(crate) fn expect_fingerprint(&mut self, expected: &[u8; 8]) -> Result<()> {
         if self.take(8)? != expected {
             bail!("fingerprint mismatch");
         }
@@ -121,7 +155,7 @@ pub enum ImageMessage {
 }
 
 /// The leading `seq` is read and dropped: ROS2 headers do not carry one.
-fn read_header(reader: &mut Reader) -> Result<Header> {
+pub(crate) fn read_header(reader: &mut Reader) -> Result<Header> {
     reader.i32()?;
     let stamp_sec = reader.i32()?;
     let stamp_nsec = reader.i32()?;
@@ -250,7 +284,7 @@ pub struct Pose {
     pub orientation: [f64; 4],
 }
 
-fn read_pose(reader: &mut Reader) -> Result<Pose> {
+pub(crate) fn read_pose(reader: &mut Reader) -> Result<Pose> {
     Ok(Pose {
         position: reader.f64_array()?,
         orientation: reader.f64_array()?,
