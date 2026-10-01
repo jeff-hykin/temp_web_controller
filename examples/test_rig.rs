@@ -64,8 +64,10 @@ fn describe_twist(payload: &[u8]) -> String {
         return format!("bad-length-{}", payload.len());
     }
     payload[8..]
-        .chunks_exact(8)
-        .map(|value| f64::from_be_bytes(value.try_into().unwrap()).to_string())
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|value| f64::from_be_bytes(*value).to_string())
         .collect::<Vec<_>>()
         .join(" ")
 }
