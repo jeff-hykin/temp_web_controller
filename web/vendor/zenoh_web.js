@@ -1,4 +1,4 @@
-// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@ada76204e2723529a0627e3af59039e61585e8d8 by run/vendor_zenoh_web. Do not edit.
+// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6 by run/vendor_zenoh_web. Do not edit.
 // zenoh-web/client/vendor/fzstd.ts
 var ab = ArrayBuffer;
 var u8 = Uint8Array;
@@ -650,7 +650,8 @@ var subscribeOptionNames = /* @__PURE__ */ new Set([
   "minQuality",
   "maxQuality",
   "qualityToHzTradeoff",
-  "codec"
+  "codec",
+  "imageTransport"
 ]);
 var publisherOptionNames = /* @__PURE__ */ new Set([
   "delivery",
@@ -694,14 +695,22 @@ function validateSubscribeOptions(options, codecs = builtinCodecInfos) {
   if ((options.minQuality ?? 0) > (options.maxQuality ?? 1)) {
     throw new RangeError("zenoh-web: minQuality must be <= maxQuality");
   }
+  if (options.imageTransport !== void 0 && options.imageTransport !== "video" && options.imageTransport !== "jpeg") {
+    throw new TypeError(`zenoh-web: imageTransport must be "video" or "jpeg", got ${String(options.imageTransport)}`);
+  }
   if (options.codec !== void 0) {
     const codec = codecs.find((info) => info.name === options.codec);
     if (codec === void 0) {
       throw new TypeError(`zenoh-web: unknown codec "${String(options.codec)}" (the bridge has: ${codecs.map((info) => info.name).join(", ")})`);
     }
-    if (codec.output === "video" && options.delivery === "reliable") {
-      throw new TypeError(`zenoh-web: ${options.codec} is a video codec (a lossy video track); use delivery "latest"`);
+    if (codec.output !== "video" && options.imageTransport !== void 0) {
+      throw new TypeError(`zenoh-web: imageTransport applies to video codecs; ${options.codec} sends data`);
     }
+    if (codec.output === "video" && options.imageTransport !== "jpeg" && options.delivery === "reliable") {
+      throw new TypeError(`zenoh-web: ${options.codec} is a video codec (a lossy video track); use delivery "latest" (or imageTransport "jpeg")`);
+    }
+  } else if (options.imageTransport !== void 0) {
+    throw new TypeError("zenoh-web: imageTransport needs a video codec");
   }
 }
 function validatePublisherOptions(options) {
@@ -999,9 +1008,18 @@ var Subscription = class extends Endpoint {
   #bytesSinceAck;
   #ackTimer;
   #partials;
+  /** a video codec sending JPEG files on the data channel */
+  #jpeg;
+  /** jpeg: the newest message waiting for its picture to decode (older ones are dropped) */
+  #pendingImage;
+  #decodingImage;
+  /** jpeg: pictures replaced by a newer one before they finished decoding */
+  imagesSkipped;
   constructor(owner, id, key, options, callback) {
-    super(owner, id, key), this.options = options, this.callback = callback, this.received = 0, this.partialDropped = 0, this.decodeErrors = 0, this.mediaStream = null, this.#warnedNoDecoder = false, this.#videoTransceiver = null, this.#droppedBefore = 0, this.#firstSeq = -1, this.#maxSeq = -1, this.#receivedOnChannel = 0, this.#highestConsumedFrame = -1, this.#bytesSinceAck = 0, this.#ackTimer = null, this.#partials = /* @__PURE__ */ new Map();
-    this.codecKind = options.codec === void 0 ? null : owner.codecs.find((info) => info.name === options.codec)?.output ?? "data";
+    super(owner, id, key), this.options = options, this.callback = callback, this.received = 0, this.partialDropped = 0, this.decodeErrors = 0, this.mediaStream = null, this.#warnedNoDecoder = false, this.#videoTransceiver = null, this.#droppedBefore = 0, this.#firstSeq = -1, this.#maxSeq = -1, this.#receivedOnChannel = 0, this.#highestConsumedFrame = -1, this.#bytesSinceAck = 0, this.#ackTimer = null, this.#partials = /* @__PURE__ */ new Map(), this.#pendingImage = null, this.#decodingImage = false, this.imagesSkipped = 0;
+    const output = options.codec === void 0 ? null : owner.codecs.find((info) => info.name === options.codec)?.output ?? "data";
+    this.#jpeg = output === "video" && options.imageTransport === "jpeg";
+    this.codecKind = this.#jpeg ? "data" : output;
   }
   get state() {
     if (this.closed) {
@@ -1146,6 +1164,9 @@ var Subscription = class extends Endpoint {
         message.mediaStream = this.mediaStream ?? void 0;
         return true;
       }
+      if (this.#jpeg) {
+        return true;
+      }
       const name = String(this.options.codec);
       const decoder = codecDecoders.get(name);
       if (decoder !== void 0) {
@@ -1173,11 +1194,50 @@ var Subscription = class extends Endpoint {
     if (message.seq > this.#maxSeq) {
       this.#maxSeq = message.seq;
     }
+    if (this.#jpeg && typeof createImageBitmap === "function") {
+      if (this.#pendingImage !== null) {
+        this.imagesSkipped++;
+      }
+      this.#pendingImage = message;
+      void this.#decodeImages();
+      return;
+    }
+    this.#callback(message);
+  }
+  #callback(message) {
     try {
       this.callback(message);
     } catch (error) {
       console.error(`zenoh-web: subscriber callback for ${this.key} threw`, error);
     }
+  }
+  /** One decode at a time, newest first: a picture that arrives during a decode replaces any waiting one. */
+  async #decodeImages() {
+    if (this.#decodingImage) {
+      return;
+    }
+    this.#decodingImage = true;
+    while (this.#pendingImage !== null && !this.closed) {
+      const message = this.#pendingImage;
+      this.#pendingImage = null;
+      try {
+        message.image = await createImageBitmap(new Blob([
+          message.bytes
+        ], {
+          type: "image/jpeg"
+        }));
+      } catch (error) {
+        this.decodeErrors++;
+        console.error(`zenoh-web: JPEG on ${message.key} did not decode`, error);
+        continue;
+      }
+      if (this.closed) {
+        message.image.close();
+        break;
+      }
+      this.#callback(message);
+    }
+    this.#decodingImage = false;
   }
   /** Tells the bridge we processed every frame up to frameId: 4 bytes, little endian. */
   #consumed(channel, frameId, byteLength) {

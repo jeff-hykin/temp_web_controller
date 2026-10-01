@@ -162,8 +162,14 @@ const HOOKS = `(() => {
     }
     const nativeCreateImageBitmap = window.createImageBitmap
     window.createImageBitmap = async function (source, ...rest) {
+        const calledAt = performance.now()
         const bitmap = await nativeCreateImageBitmap.call(this, source, ...rest)
-        if (crcOf.has(source)) {
+        if (!crcOf.has(source) && source instanceof NativeBlob && source.type === "image/jpeg") {
+            // zenoh-web's imageTransport "jpeg": the client decodes each file as it completes
+            const marker = readMarker(bitmap, bitmap.width, bitmap.height)
+            markerOf.set(bitmap, marker)
+            M.ws.push({ at: calledAt, topic: "", bytes: source.size, crc: null, marker })
+        } else if (crcOf.has(source)) {
             const crc = crcOf.get(source)
             crcOf.set(bitmap, crc)
             const marker = readMarker(bitmap, bitmap.width, bitmap.height)
@@ -177,8 +183,8 @@ const HOOKS = `(() => {
     const nativeDrawImage = CanvasRenderingContext2D.prototype.drawImage
     CanvasRenderingContext2D.prototype.drawImage = function (image, ...rest) {
         const result = nativeDrawImage.call(this, image, ...rest)
-        if (crcOf.has(image)) {
-            const entry = { crc: crcOf.get(image), marker: markerOf.get(image) ?? null, drawAt: performance.now(), shownAt: null }
+        if (markerOf.has(image)) {
+            const entry = { crc: crcOf.get(image) ?? null, marker: markerOf.get(image) ?? null, drawAt: performance.now(), shownAt: null }
             M.draws.push(entry)
             requestAnimationFrame(() => { entry.shownAt = performance.now() })
         }
@@ -327,8 +333,9 @@ function analyze({ data, version, camera, relay, offset }) {
         relayReceiveToPublishMs: summarize(relayInWindow.map((frame) => frame.publishedMs - frame.receivedMs)),
         cameraStampToRelayReceiveMs: summarize(relayInWindow.map((frame) => frame.receivedMs - frame.stampMs)),
     }
-    if (version === "main") {
-        const received = data.ws.filter((frame) => inWindow(frame.at) && frame.topic.includes(camera))
+    // main, and the branch with imageTransport "jpeg": JPEG files decoded and drawn on a canvas
+    if (version === "main" || data.draws.length > 0) {
+        const received = data.ws.filter((frame) => inWindow(frame.at) && (frame.topic === "" || frame.topic.includes(camera)))
         const draws = data.draws.filter((draw) => inWindow(draw.drawAt))
         const shownPairs = draws.filter((draw) => draw.shownAt !== null).map((draw) => ({ draw, source: sourceOf(draw.marker, toMac(draw.shownAt)) })).filter((pair) => pair.source)
         const arrivalPairs = received.map((frame) => ({ frame, source: sourceOf(frame.marker, toMac(frame.at)) })).filter((pair) => pair.source)

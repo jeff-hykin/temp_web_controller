@@ -9,10 +9,12 @@ for (const dir of Deno.args) {
         const result = JSON.parse(Deno.readTextFileSync(`${dir}/${entry.name}`))
         for (const [index, tab] of result.tabs.entries()) {
             for (const stream of tab.streams) {
-                const isMain = result.version === "main"
-                const bytes = isMain ? stream.bytesPerFrame : stream.tab.videoPayloadBytesPerFrame
-                const mbps = isMain ? stream.mbps : stream.tab.videoPayloadMbps
-                const size = isMain ? (tab.tileBars.find((bar) => bar.includes(stream.camera)) ?? "").match(/(\d+x\d+ q\d+)/)?.[1] ?? "" : `${stream.videoSize} q${f(stream.quality.p50, 2)}`
+                // canvas-drawn JPEGs (main, branch imageTransport "jpeg") vs the branch's H.264 track
+                const canvas = stream.bytesPerFrame !== undefined
+                const bytes = canvas ? stream.bytesPerFrame : stream.tab.videoPayloadBytesPerFrame
+                const mbps = canvas ? stream.mbps : stream.tab.videoPayloadMbps
+                const bar = tab.tileBars.find((text) => text.includes(stream.camera)) ?? ""
+                const size = canvas ? bar.match(/(\d+x\d+ (q\d+|jpeg))/)?.[1] ?? "" : `${stream.videoSize} q${f(stream.quality.p50, 2)}`
                 // an unmarked camera has no exact latency; zenoh-web's metadata pairing estimates it (marked ~)
                 const estimated = stream.latencyShownMs.n === 0 && stream.metadataPairing?.latencyShownMs.n > 0
                 const shown = estimated ? stream.metadataPairing.latencyShownMs : stream.latencyShownMs

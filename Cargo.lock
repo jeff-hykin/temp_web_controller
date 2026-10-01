@@ -5547,7 +5547,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web"
 version = "0.2.0"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ada76204e2723529a0627e3af59039e61585e8d8#ada76204e2723529a0627e3af59039e61585e8d8"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6#ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5558,6 +5558,7 @@ dependencies = [
  "env_logger",
  "futures",
  "image-webp",
+ "jpeg-encoder",
  "jxl-oxide",
  "log",
  "openh264",
@@ -5577,7 +5578,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-rtc"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ada76204e2723529a0627e3af59039e61585e8d8#ada76204e2723529a0627e3af59039e61585e8d8"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6#ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6"
 dependencies = [
  "bytes",
  "hex",
@@ -5612,7 +5613,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-rtc-datachannel"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ada76204e2723529a0627e3af59039e61585e8d8#ada76204e2723529a0627e3af59039e61585e8d8"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6#ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6"
 dependencies = [
  "bytes",
  "log",
@@ -5624,7 +5625,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-rtc-sctp"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ada76204e2723529a0627e3af59039e61585e8d8#ada76204e2723529a0627e3af59039e61585e8d8"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6#ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6"
 dependencies = [
  "bytes",
  "crc32c",
@@ -5639,7 +5640,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-webrtc"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ada76204e2723529a0627e3af59039e61585e8d8#ada76204e2723529a0627e3af59039e61585e8d8"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6#ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6"
 dependencies = [
  "async-broadcast",
  "async-channel",

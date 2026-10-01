@@ -291,10 +291,10 @@ async function scenario(name, { external }) {
         return ready ? sampled : null
     }, 30000, 500) ?? await sampleTiles()
     console.log(JSON.stringify(samples))
-    check(samples[CAMERAS.lcmColor]?.kind === "video" && redGreenBlue(samples[CAMERAS.lcmColor]),
-        `${name}: the lcm rgb8 camera shows as video with the fixture's colours (${JSON.stringify(samples[CAMERAS.lcmColor])})`)
-    check(samples[CAMERAS.zenohColor]?.kind === "video" && redGreenBlue(samples[CAMERAS.zenohColor]),
-        `${name}: the zenoh CompressedImage camera shows as video with the fixture's colours (${JSON.stringify(samples[CAMERAS.zenohColor])})`)
+    check(samples[CAMERAS.lcmColor]?.kind === "canvas" && redGreenBlue(samples[CAMERAS.lcmColor]) && samples[CAMERAS.lcmColor].info.includes("jpeg"),
+        `${name}: the lcm rgb8 camera shows as JPEG pictures with the fixture's colours (${JSON.stringify(samples[CAMERAS.lcmColor])})`)
+    check(samples[CAMERAS.zenohColor]?.kind === "canvas" && redGreenBlue(samples[CAMERAS.zenohColor]) && samples[CAMERAS.zenohColor].info.includes("jpeg"),
+        `${name}: the zenoh CompressedImage camera shows as JPEG pictures with the fixture's colours (${JSON.stringify(samples[CAMERAS.zenohColor])})`)
     check(samples[CAMERAS.lcmDepth]?.kind === "canvas" && samples[CAMERAS.lcmDepth].litFraction > 0.9 && samples[CAMERAS.lcmDepth].width === 320,
         `${name}: the lcm 16UC1 camera is drawn as depth, every pixel coloured (${JSON.stringify(samples[CAMERAS.lcmDepth])})`)
     const watched = (await (await fetch(`${base}/api/status`)).json()).topics.find((topic) => topic.topic === "test_lcm_depth")
