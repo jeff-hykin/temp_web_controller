@@ -439,7 +439,6 @@ function analyze({ data, version, camera, relay, offset }) {
 const before = await clockOffset()
 console.log(`clock: robot - mac = ${before.offsetMs.toFixed(1)} ms ± ${before.errorMs.toFixed(1)} (min rtt ${before.rttMinMs.toFixed(1)} ms)`)
 
-const browser = await launch({ headless: true, args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"] })
 const tabs = [{ cameras: [args.camera] }]
 if (args["second-tab"]) {
     tabs.push({ cameras: [args["second-camera"]] })
@@ -447,7 +446,10 @@ if (args["second-tab"]) {
 let results
 try {
     for (const tab of tabs) {
-        tab.page = await browser.newPage()
+        // one Chrome per viewer: a second tab in the same window is hidden, and a hidden page
+        // runs no requestAnimationFrame or requestVideoFrameCallback
+        tab.browser = await launch({ headless: true, args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required"] })
+        tab.page = await tab.browser.newPage()
         const celestial = tab.page.unsafelyGetCelestialBindings()
         await celestial.Page.enable()
         await celestial.Page.addScriptToEvaluateOnNewDocument({ source: HOOKS })
@@ -505,7 +507,9 @@ try {
         })),
     }
 } finally {
-    await browser.close()
+    for (const tab of tabs) {
+        await tab.browser?.close()
+    }
 }
 
 await Deno.mkdir(args.out, { recursive: true })
