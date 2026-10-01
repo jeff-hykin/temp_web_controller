@@ -22,7 +22,7 @@ socket2 = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 zenoh = { version = "1.10", features = ["unstable"] }
 # not on crates.io yet; pinned, and web/vendor/zenoh_web.js is bundled from this same rev (run/vendor_zenoh_web)
-zenoh-web = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "f81d057f5e24876491db9488b6e0e1cc1461c411" }
+zenoh-web = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "8d3825101d4887f6c9eefd2c2ade211a390526ed" }
 zune-core = "0.5.3"
 zune-jpegxl = "0.5.2"
 
