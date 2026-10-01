@@ -5547,7 +5547,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web"
 version = "0.2.0"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=6ea205720866833ea8c1fcb4463e7cf47c0364ea#6ea205720866833ea8c1fcb4463e7cf47c0364ea"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=d8fe443cea9a5a79546246bb43331c110a9aa0eb#d8fe443cea9a5a79546246bb43331c110a9aa0eb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5577,7 +5577,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-rtc"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=6ea205720866833ea8c1fcb4463e7cf47c0364ea#6ea205720866833ea8c1fcb4463e7cf47c0364ea"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=d8fe443cea9a5a79546246bb43331c110a9aa0eb#d8fe443cea9a5a79546246bb43331c110a9aa0eb"
 dependencies = [
  "bytes",
  "hex",
@@ -5612,7 +5612,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-rtc-datachannel"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=6ea205720866833ea8c1fcb4463e7cf47c0364ea#6ea205720866833ea8c1fcb4463e7cf47c0364ea"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=d8fe443cea9a5a79546246bb43331c110a9aa0eb#d8fe443cea9a5a79546246bb43331c110a9aa0eb"
 dependencies = [
  "bytes",
  "log",
@@ -5624,7 +5624,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-rtc-sctp"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=6ea205720866833ea8c1fcb4463e7cf47c0364ea#6ea205720866833ea8c1fcb4463e7cf47c0364ea"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=d8fe443cea9a5a79546246bb43331c110a9aa0eb#d8fe443cea9a5a79546246bb43331c110a9aa0eb"
 dependencies = [
  "bytes",
  "crc32c",
@@ -5639,7 +5639,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web-webrtc"
 version = "0.21.0-zw.1"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=6ea205720866833ea8c1fcb4463e7cf47c0364ea#6ea205720866833ea8c1fcb4463e7cf47c0364ea"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=d8fe443cea9a5a79546246bb43331c110a9aa0eb#d8fe443cea9a5a79546246bb43331c110a9aa0eb"
 dependencies = [
  "async-broadcast",
  "async-channel",
