@@ -1,4 +1,4 @@
-// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@d87c804a32476434a9e1541d3b38c912435b6e7e by run/vendor_zenoh_web. Do not edit.
+// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@799d8f4a8412505bf195b521c8e865d35e120845 by run/vendor_zenoh_web. Do not edit.
 // zenoh-web/client/vendor/fzstd.ts
 var ab = ArrayBuffer;
 var u8 = Uint8Array;
@@ -1552,6 +1552,12 @@ var ZenohWeb = class {
       const transceiver = peer.addTransceiver("video", {
         direction: "recvonly"
       });
+      const receiver = transceiver.receiver;
+      if ("jitterBufferTarget" in receiver) {
+        receiver.jitterBufferTarget = 0;
+      } else {
+        receiver.playoutDelayHint = 0;
+      }
       await peer.setLocalDescription(await peer.createOffer());
       const offer = peer.localDescription;
       const response = await this._request({

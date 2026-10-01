@@ -22,7 +22,7 @@ socket2 = "0.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal"] }
 zenoh = { version = "1.10", features = ["unstable"] }
 # not on crates.io yet; pinned, and web/vendor/zenoh_web.js is bundled from this same rev (run/vendor_zenoh_web)
-zenoh-web = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "d87c804a32476434a9e1541d3b38c912435b6e7e" }
+zenoh-web = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "799d8f4a8412505bf195b521c8e865d35e120845" }
 zune-core = "0.5.3"
 zune-jpegxl = "0.5.2"
 
@@ -35,4 +35,4 @@ jxl-oxide = { version = "0.12.6", default-features = false }
 
 # zenoh 1.10.1 with the admin-space deadlock fixed, from zenoh-web (bridge/forks/zenoh); same rev as above
 [patch.crates-io]
-zenoh = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "d87c804a32476434a9e1541d3b38c912435b6e7e" }
+zenoh = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "799d8f4a8412505bf195b521c8e865d35e120845" }
