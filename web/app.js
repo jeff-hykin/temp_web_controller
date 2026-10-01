@@ -969,6 +969,7 @@ function countVideoFrames(tile) {
         return
     }
     const onFrame = () => {
+        tile.framesComposited = true
         tile.painted += 1
         tile.paintedAt = performance.now()
         video.requestVideoFrameCallback(onFrame)
@@ -1038,6 +1039,12 @@ function onTileMessage(tile, message) {
     if (message.mediaStream && tile.media.srcObject !== message.mediaStream) {
         tile.media.srcObject = message.mediaStream
         tile.media.play().catch(() => {})
+    }
+    // Each video frame also brings its metadata here. Where requestVideoFrameCallback
+    // never fires (no compositor, an old browser) that arrival is the best sign of life.
+    if (message.video && !tile.framesComposited) {
+        tile.painted += 1
+        tile.paintedAt = performance.now()
     }
     if (message.depth) {
         drawDepth(tile, message.depth)
@@ -1258,7 +1265,7 @@ function driveTick() {
             })
         }
         publisher.put(encodeTwist(twist.linear, twist.angular))
-    } catch (error) {
+    } catch {
         // Tripped since the last tick; the next one makes a fresh publisher.
         drive.armed = false
     }

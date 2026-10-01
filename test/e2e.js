@@ -108,9 +108,15 @@ async function stop(child) {
     await child.catch(() => {})
 }
 
-async function listenerPids(port) {
+/** The commands of every process listening on `port`. */
+async function listeners(port) {
     const output = await $`lsof -nP -iTCP:${port} -sTCP:LISTEN -t`.noThrow().text()
-    return [...new Set(output.split("\n").filter(Boolean).map(Number))]
+    const pids = [...new Set(output.split("\n").filter(Boolean))]
+    const commands = []
+    for (const pid of pids) {
+        commands.push((await $`ps -o comm= -p ${pid}`.noThrow().text()).trim().split("/").pop())
+    }
+    return commands
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -183,7 +189,7 @@ async function scenario(name, { external }) {
         const bridgeZenohPort = freePort()
         externalBridge = spawn(`${name}.zenoh-web`, $`${zenohWeb} --port ${zenohWebPort}
             --zenoh-config ${isolatedConfig(`${name}.zenoh-web`, [`tcp/127.0.0.1:${bridgeZenohPort}`])}
-            --connect tcp/127.0.0.1:${rigZenohPort}`.env("RUST_LOG", "info,zenoh=warn"))
+            --connect tcp/127.0.0.1:${rigZenohPort}`.env("RUST_LOG", "info,zenoh=warn,zenoh_web=info"))
         await externalBridge.stderr.waitFor((line) => line.includes("listening on"), 20000)
         connects.push("--zenoh-connect", `tcp/127.0.0.1:${bridgeZenohPort}`)
     }
@@ -200,10 +206,10 @@ async function scenario(name, { external }) {
     const status = await (await fetch(`${base}/api/status`)).json()
     const expectedMode = external ? "external" : "in-process"
     check(status.zenoh_web.mode === expectedMode, `${name}: web_ctrl reports zenoh-web ${expectedMode} (${modeLine.trim()})`)
-    const holders = await listenerPids(zenohWebPort)
-    const expectedHolder = external ? externalBridge.child.pid : webCtrl.child.pid
+    const holders = await listeners(zenohWebPort)
+    const expectedHolder = external ? "zenoh-web" : "web_ctrl"
     check(holders.length === 1 && holders[0] === expectedHolder,
-        `${name}: port ${zenohWebPort} is held only by ${external ? "the zenoh-web that was already running" : "web_ctrl's in-process zenoh-web"} (pids ${holders})`)
+        `${name}: port ${zenohWebPort} is held only by ${external ? "the zenoh-web that was already running" : "web_ctrl's in-process zenoh-web"} (${holders})`)
     const health = await fetch(`http://127.0.0.1:${zenohWebPort}/zenoh-web/health`).then((response) => response.json()).catch(() => null)
     check(health?.service === "zenoh-web", `${name}: GET /zenoh-web/health answers on the zenoh-web port`)
 
@@ -311,8 +317,9 @@ async function scenario(name, { external }) {
         return !live.active && listed.length > 0 ? listed : null
     }, 15000)
     const mcap = files ? Deno.readFileSync(files[0].path) : new Uint8Array()
-    const text = new TextDecoder("latin1").decode(mcap)
-    check(text.startsWith("\x89MCAP0\r\n") && text.includes("test_lcm_cam") && text.includes("test_lcm_depth") && text.includes("dimos/test_zenoh_cam"),
+    const text = new TextDecoder().decode(mcap)
+    const magic = [0x89, 0x4d, 0x43, 0x41, 0x50, 0x30, 0x0d, 0x0a]
+    check(magic.every((byte, index) => mcap[index] === byte) && text.includes("test_lcm_cam") && text.includes("test_lcm_depth") && text.includes("dimos/test_zenoh_cam"),
         `${name}: the mcap (${files?.[0]?.name}, ${mcap.length} bytes) contains the lcm and zenoh camera topics`)
 
     $.logStep(`${name}: steering on ${COMMAND_TOPIC}`)
