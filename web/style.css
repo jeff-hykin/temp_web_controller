@@ -152,13 +152,19 @@ main {
     box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5);
 }
 
-.tile canvas {
+.tile canvas,
+.tile video {
     flex: 1;
     width: 100%;
     min-height: 0;
     object-fit: contain;
     background: #000;
     display: block;
+}
+
+/* A frozen frame reads exactly like a live one, so an offline video is hidden. */
+.tile.offline video {
+    visibility: hidden;
 }
 
 /* A cleared canvas is indistinguishable from a very dark scene, so the tile says

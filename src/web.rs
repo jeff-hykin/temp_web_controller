@@ -1,4 +1,4 @@
-use crate::hub::{Command, Hub, SettingsPatch};
+use crate::hub::{Hub, SettingsPatch};
 use crate::launcher::Launcher;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
@@ -7,7 +7,6 @@ use axum::response::{IntoResponse, Response};
 use axum::http::StatusCode;
 use axum::routing::{delete, get};
 use axum::Router;
-use bytes::Bytes;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
@@ -23,21 +22,26 @@ pub struct AppState {
     /// Set while the lcm receiver is down. Without this the thread could die at
     /// boot and the UI would look merely idle rather than deaf.
     pub lcm_receiver_error: Arc<Mutex<Option<String>>>,
+    /// Which zenoh-web the page is talking to: "in-process" or "external", and where.
+    pub zenoh_web_mode: &'static str,
+    pub zenoh_web_address: String,
 }
 
-pub fn router(state: AppState) -> Router {
+/// `zenoh_web` carries the page's signaling routes, mounted at `/zenoh-web`.
+pub fn router(state: AppState, zenoh_web: Router) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/app.js", get(script))
         .route("/style.css", get(stylesheet))
+        .route("/vendor/zenoh_web.js", get(zenoh_web_client))
         .route("/healthz", get(|| async { "ok" }))
         .route("/api/status", get(status))
         .route("/api/tf", get(tf))
         .route("/api/recordings", get(recordings))
         .route("/api/recordings/{name}", delete(remove_recording))
         .route("/ws", get(control_socket))
-        .route("/ws/stream/{*topic}", get(stream_socket))
         .with_state(state)
+        .nest("/zenoh-web", zenoh_web)
 }
 
 async fn index() -> Response {
@@ -52,6 +56,17 @@ async fn script() -> Response {
     (
         [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
         include_str!("../web/app.js"),
+    )
+        .into_response()
+}
+
+/// zenoh-web's browser client, bundled from the pinned commit by
+/// `run/vendor_zenoh_web` and compiled into the binary, so a robot without
+/// internet still serves a working page.
+async fn zenoh_web_client() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/javascript; charset=utf-8")],
+        include_str!("../web/vendor/zenoh_web.js"),
     )
         .into_response()
 }
@@ -92,13 +107,16 @@ fn status_payload(state: &AppState) -> serde_json::Value {
         "type": "status",
         "topics": state.hub.topic_views(),
         "settings": state.hub.settings(),
-        "streams": state.hub.stream_stats(),
         "recording": state.hub.recording_status(),
         "launcher": state.launcher.view(),
         "publish": {
             "topic": state.hub.settings().publish_topic,
             "lcm": state.lcm_enabled,
             "zenoh": state.zenoh_enabled,
+        },
+        "zenoh_web": {
+            "mode": state.zenoh_web_mode,
+            "address": state.zenoh_web_address,
         },
         "receivers": {
             "lcm_error": state.lcm_receiver_error.lock().unwrap().clone(),
@@ -109,14 +127,6 @@ fn status_payload(state: &AppState) -> serde_json::Value {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ClientMessage {
-    Cmd {
-        #[serde(default)]
-        forward: f64,
-        #[serde(default)]
-        strafe: f64,
-        #[serde(default)]
-        turn: f64,
-    },
     Settings(SettingsPatch),
     Record {
         #[serde(default)]
@@ -139,10 +149,6 @@ enum ClientMessage {
     LaunchDelete {
         name: String,
     },
-    Painted {
-        topic: String,
-        fps: f64,
-    },
 }
 
 async fn control_socket(upgrade: WebSocketUpgrade, State(state): State<AppState>) -> Response {
@@ -151,8 +157,9 @@ async fn control_socket(upgrade: WebSocketUpgrade, State(state): State<AppState>
 
 /// Reading and writing run as separate tasks. Sharing one loop meant a status
 /// payload that could not drain into a congested phone also held up everything the
-/// browser was trying to say — a Stop Recording press, or a stop command from the
-/// drive stick — until the send finally went through.
+/// browser was trying to say — a Stop Recording press, say — until the send finally
+/// went through. Steering does not come through here: the page publishes it on
+/// zenoh itself, through zenoh-web.
 async fn run_control_socket(socket: WebSocket, state: AppState) {
     let (mut sink, mut stream) = socket.split();
     let writer_state = state.clone();
@@ -175,9 +182,6 @@ async fn run_control_socket(socket: WebSocket, state: AppState) {
             continue;
         };
         match serde_json::from_str::<ClientMessage>(&text) {
-            Ok(ClientMessage::Cmd { forward, strafe, turn }) => {
-                state.hub.set_command(Command { forward, strafe, turn });
-            }
             Ok(ClientMessage::Settings(patch)) => {
                 state.hub.apply_settings(patch);
             }
@@ -221,57 +225,10 @@ async fn run_control_socket(socket: WebSocket, state: AppState) {
                     state.launcher.note(error.to_string());
                 }
             }
-            Ok(ClientMessage::Painted { topic, fps }) => {
-                state.hub.report_painted(&topic, fps);
-            }
             Err(error) => eprintln!("ignoring malformed control message: {error}"),
         }
     }
 
     writer.abort();
-    state.hub.on_control_disconnect();
 }
 
-async fn stream_socket(
-    upgrade: WebSocketUpgrade,
-    Path(topic): Path<String>,
-    State(state): State<AppState>,
-) -> Response {
-    upgrade.on_upgrade(move |socket| run_stream_socket(socket, topic, state))
-}
-
-/// Sends the newest frame available at the moment the socket is free. A client
-/// that cannot keep up simply misses the frames it slept through.
-async fn run_stream_socket(mut socket: WebSocket, topic: String, state: AppState) {
-    let stream = state.hub.open_stream(&topic);
-    let mut frames = stream.subscribe();
-
-    loop {
-        let frame = tokio::select! {
-            changed = frames.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-                frames.borrow_and_update().clone()
-            }
-            // An idle topic must still notice a browser that walked away.
-            _ = tokio::time::sleep(Duration::from_secs(5)) => {
-                if socket.send(Message::Ping(Bytes::new())).await.is_err() {
-                    break;
-                }
-                continue;
-            }
-        };
-        let Some(frame) = frame else {
-            continue;
-        };
-        if socket.send(Message::Binary(frame.jpeg.clone())).await.is_err() {
-            break;
-        }
-        // The send above blocks until the client's socket drains, so counting it
-        // here is the only place we learn what the viewer can actually take.
-        stream.on_delivered();
-    }
-
-    state.hub.close_stream(&stream);
-}

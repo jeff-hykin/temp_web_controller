@@ -111,16 +111,21 @@
             <p class="group-title">Video</p>
             <label class="row switch">
                 <input type="checkbox" id="auto-quality">
-                <span>Adapt quality to keep up</span>
+                <span>Lower quality to keep up</span>
             </label>
             <label class="row slider">
-                <span>JPEG quality <em id="label-quality"></em></span>
-                <input type="range" id="quality" min="25" max="85" step="5">
+                <span>Best quality <em id="label-quality"></em></span>
+                <input type="range" id="quality" min="10" max="100" step="5">
             </label>
             <label class="row slider">
-                <span>Max width <em id="label-max-width"></em></span>
-                <input type="range" id="max-width" min="320" max="1920" step="160">
+                <span>Max frame rate <em id="label-max-hz"></em></span>
+                <input type="range" id="max-hz" min="0" max="30" step="1">
             </label>
+            <label class="row slider">
+                <span>On a slow link <em id="label-tradeoff"></em></span>
+                <input type="range" id="tradeoff" min="0" max="1" step="0.1">
+            </label>
+            <p class="hint-text">Cameras arrive as H.264 video and depth stays lossless. Quality sets resolution and bitrate; with "lower quality" off, only the frame rate gives when the link is short. The last slider picks what gives first: "sharp" keeps the picture and drops frames, "smooth" keeps the frames and drops the picture.</p>
         </div>
 
         <div class="group">
@@ -237,6 +242,6 @@
         </div>
     </aside>
 
-    <script src="/app.js"></script>
+    <script type="module" src="/app.js"></script>
 </body>
 </html>

@@ -1,54 +1,52 @@
-use crate::hub::Hub;
 use anyhow::{anyhow, Result};
-use std::sync::Arc;
+use std::path::Path;
 use zenoh::pubsub::Subscriber;
+use zenoh::sample::Sample;
 use zenoh::Session;
 
-pub async fn open() -> Result<Session> {
-    zenoh::open(zenoh::Config::default())
-        .await
-        .map_err(|error| anyhow!("{error}"))
+/// zenoh's defaults (a peer with multicast scouting) unless a json5 file is given,
+/// plus any extra endpoints to connect to.
+pub fn config(file: Option<&Path>, connect: &[String]) -> Result<zenoh::Config> {
+    let mut config = match file {
+        Some(path) => zenoh::Config::from_file(path).map_err(|error| anyhow!("{}: {error}", path.display()))?,
+        None => zenoh::Config::default(),
+    };
+    if !connect.is_empty() {
+        config
+            .insert_json5("connect/endpoints", &serde_json::to_string(connect)?)
+            .map_err(|error| anyhow!("{error}"))?;
+    }
+    Ok(config)
 }
 
-/// One catch-all subscriber feeds discovery; payloads for unwatched topics are
-/// counted and dropped without decoding.
-pub async fn subscribe_all(session: &Session, hub: Arc<Hub>) -> Result<Subscriber<()>> {
+pub async fn open(config: zenoh::Config) -> Result<Session> {
+    zenoh::open(config).await.map_err(|error| anyhow!("{error}"))
+}
+
+/// One catch-all subscriber feeds discovery, recording and the command mirror.
+pub async fn subscribe_all<F>(session: &Session, on_sample: F) -> Result<Subscriber<()>>
+where
+    F: Fn(&str, &[u8]) + Send + Sync + 'static,
+{
     let subscriber = session
         .declare_subscriber("**")
-        .callback(move |sample| {
-            let key_expr = sample.key_expr().as_str().to_owned();
-            let payload = sample.payload().to_bytes();
-            hub.on_zenoh_message(&key_expr, &payload);
+        .callback(move |sample: Sample| {
+            on_sample(sample.key_expr().as_str(), &sample.payload().to_bytes());
         })
         .await
         .map_err(|error| anyhow!("{error}"))?;
     Ok(subscriber)
 }
 
-/// Published per message rather than through a declared publisher, because the
-/// command topic can be renamed from the settings drawer while running.
-pub async fn put(session: &Session, key_expr: String, payload: Vec<u8>) -> Result<()> {
+/// The tcp port this session listens on, for a second session in this process to
+/// connect to directly instead of hoping multicast scouting finds it.
+pub async fn local_tcp_port(session: &Session) -> Option<u16> {
     session
-        .put(key_expr, payload)
+        .info()
+        .locators()
         .await
-        .map_err(|error| anyhow!("{error}"))
-}
-
-/// Zenoh key expressions may not start with `/`, but dimos topics are written
-/// `/tele_cmd_vel`, so the leading slash is dropped and the type appended.
-pub fn key_expr_for(topic: &str, msg_type: &str) -> String {
-    format!("{}/{}", topic.trim_start_matches('/'), msg_type)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn builds_a_dimos_style_key_expression() {
-        assert_eq!(
-            key_expr_for("/tele_cmd_vel", "geometry_msgs.Twist"),
-            "tele_cmd_vel/geometry_msgs.Twist"
-        );
-    }
+        .iter()
+        .map(|locator| locator.to_string())
+        .filter(|locator| locator.starts_with("tcp/"))
+        .find_map(|locator| locator.rsplit(':').next().and_then(|port| port.parse().ok()))
 }

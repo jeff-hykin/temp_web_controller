@@ -5,13 +5,16 @@ mod launcher;
 mod lcm;
 mod msgs;
 mod record;
+mod relay;
 mod service;
 mod web;
 mod zenoh_io;
+mod zenoh_web_link;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use hub::{Hub, Settings, Transport};
+use relay::LcmRelay;
 use std::path::{Path, PathBuf};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex};
@@ -37,9 +40,24 @@ struct Args {
     #[arg(long, global = true, default_value = "/tele_cmd_vel")]
     topic: String,
 
-    /// Which transports to publish commands on. Both listen either way.
+    /// Which transports commands reach. The page always publishes on zenoh (through
+    /// zenoh-web); anything but `zenoh` also mirrors the command topic onto lcm.
     #[arg(long, global = true, value_enum, default_value_t = TransportChoice::Both)]
     transport: TransportChoice,
+
+    /// The zenoh-web server the page uses. If one already answers here it is used;
+    /// otherwise web_ctrl starts its own in-process on this url's port.
+    #[arg(long, global = true, default_value = zenoh_web_link::DEFAULT_URL)]
+    zenoh_web: String,
+
+    /// zenoh config (json5) for web_ctrl's sessions. Default: zenoh's defaults, a
+    /// peer that finds others by multicast scouting.
+    #[arg(long, global = true)]
+    zenoh_config: Option<PathBuf>,
+
+    /// zenoh endpoint to connect to, e.g. tcp/127.0.0.1:7447 (repeatable).
+    #[arg(long, global = true)]
+    zenoh_connect: Vec<String>,
 
     #[arg(long, global = true, default_value = lcm::DEFAULT_URL)]
     lcm_url: String,
@@ -76,7 +94,7 @@ impl Args {
     /// The flags the installed service should be launched with. Every path is
     /// made absolute, since a service does not inherit this shell's directory.
     fn service_arguments(&self, record_dir: &Path, launch_file: &Path) -> Vec<String> {
-        vec![
+        let mut arguments: Vec<String> = vec![
             "--port".into(),
             self.port.to_string(),
             "--bind".into(),
@@ -85,6 +103,8 @@ impl Args {
             self.topic.clone(),
             "--transport".into(),
             describe_choice(self.transport).into(),
+            "--zenoh-web".into(),
+            self.zenoh_web.clone(),
             "--lcm-url".into(),
             self.lcm_url.clone(),
             "--linear-speed".into(),
@@ -95,7 +115,16 @@ impl Args {
             record_dir.to_string_lossy().into_owned(),
             "--launch-file".into(),
             launch_file.to_string_lossy().into_owned(),
-        ]
+        ];
+        if let Some(config) = &self.zenoh_config {
+            arguments.push("--zenoh-config".into());
+            arguments.push(absolute(config).to_string_lossy().into_owned());
+        }
+        for endpoint in &self.zenoh_connect {
+            arguments.push("--zenoh-connect".into());
+            arguments.push(endpoint.clone());
+        }
+        arguments
     }
 }
 
@@ -151,44 +180,49 @@ async fn main() -> Result<()> {
         },
     );
 
+    let zenoh_config = zenoh_io::config(args.zenoh_config.as_deref(), &args.zenoh_connect)?;
+    let session = zenoh_io::open(zenoh_config.clone())
+        .await
+        .context("opening the zenoh session")?;
+    let relay = LcmRelay::new(session.clone(), Arc::clone(&hub));
+
     let lcm_url = lcm::parse_url(&args.lcm_url)?;
-    let lcm_transport = Arc::new(lcm::LcmTransport::new(lcm_url).context("opening lcm socket")?);
+    let lcm_mirroring = args.transport != TransportChoice::Zenoh;
+    let lcm_transport = match lcm_mirroring {
+        true => Some(Arc::new(lcm::LcmTransport::new(lcm_url).context("opening lcm socket")?)),
+        false => None,
+    };
     let lcm_receiver_error = Arc::new(Mutex::new(Some("starting up".to_owned())));
-    spawn_lcm_receiver(Arc::clone(&hub), lcm_url, Arc::clone(&lcm_receiver_error));
+    spawn_lcm_receiver(Arc::clone(&hub), Arc::clone(&relay), lcm_url, Arc::clone(&lcm_receiver_error));
 
-    let zenoh_session = match zenoh_io::open().await {
-        Ok(session) => Some(session),
-        Err(error) => {
-            eprintln!("zenoh unavailable, continuing on lcm only: {error}");
-            None
-        }
-    };
-    if let Some(session) = &zenoh_session {
-        match zenoh_io::subscribe_all(session, Arc::clone(&hub)).await {
-            Ok(subscriber) => std::mem::forget(subscriber),
-            Err(error) => eprintln!("zenoh discovery subscription failed: {error}"),
-        }
-    }
-    let zenoh_publishing = match args.transport {
-        TransportChoice::Lcm => None,
-        _ => zenoh_session.clone(),
-    };
+    let mirror = CommandMirror { hub: Arc::clone(&hub), lcm: lcm_transport };
+    let sample_hub = Arc::clone(&hub);
+    let subscriber = zenoh_io::subscribe_all(&session, move |key_expr, payload| {
+        sample_hub.on_zenoh_message(key_expr, payload);
+        mirror.offer(key_expr, payload);
+    })
+    .await
+    .context("zenoh discovery subscription")?;
 
-    let lcm_publishing = args.transport != TransportChoice::Zenoh;
+    let zenoh_web = zenoh_web_link::use_or_start(
+        &args.zenoh_web,
+        args.bind,
+        zenoh_config,
+        zenoh_io::local_tcp_port(&session).await,
+    )
+    .await?;
+
     let state = web::AppState {
         hub: Arc::clone(&hub),
         launcher: Arc::new(launcher::Launcher::new(launch_file)),
-        lcm_enabled: lcm_publishing,
-        zenoh_enabled: zenoh_publishing.is_some(),
+        lcm_enabled: lcm_mirroring,
+        zenoh_enabled: true,
         lcm_receiver_error,
+        zenoh_web_mode: zenoh_web.mode(),
+        zenoh_web_address: zenoh_web.address().to_owned(),
     };
 
-    spawn_rate_ticker(Arc::clone(&hub));
-    tokio::spawn(publish_commands(
-        Arc::clone(&hub),
-        lcm_publishing.then(|| Arc::clone(&lcm_transport)),
-        zenoh_publishing,
-    ));
+    spawn_ticker(Arc::clone(&hub), Arc::clone(&relay));
 
     let address = SocketAddr::new(args.bind, args.port);
     let listener = tokio::net::TcpListener::bind(address)
@@ -196,15 +230,65 @@ async fn main() -> Result<()> {
         .with_context(|| format!("binding {address}"))?;
     println!("web_ctrl on http://{}:{}", local_address(), args.port);
     println!("  commands  -> {} ({})", args.topic, describe(args.transport));
-    axum::serve(listener, web::router(state)).await?;
+    println!("  zenoh-web -> {} ({})", zenoh_web.address(), zenoh_web.mode());
+    let app = web::router(state, zenoh_web.router());
+    tokio::select! {
+        served = axum::serve(listener, app) => served?,
+        () = terminated() => {}
+    }
+    // Deadmen go out before the session they travel on closes.
+    zenoh_web.shutdown().await;
+    drop(subscriber);
     Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM, the second being how systemd stops the service.
+async fn terminated() {
+    #[cfg(unix)]
+    {
+        if let Ok(mut terminate) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {}
+                _ = terminate.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Puts what the page publishes on the command topic onto lcm as well, for robots
+/// whose stack listens there. The page itself only reaches zenoh.
+struct CommandMirror {
+    hub: Arc<Hub>,
+    lcm: Option<Arc<lcm::LcmTransport>>,
+}
+
+impl CommandMirror {
+    fn offer(&self, key_expr: &str, payload: &[u8]) {
+        let Some(lcm) = &self.lcm else {
+            return;
+        };
+        if !key_expr.ends_with(msgs::TWIST_TYPE) {
+            return;
+        }
+        let topic = self.hub.settings().publish_topic;
+        if key_expr != hub::lcm_relay_key(&topic, Some(msgs::TWIST_TYPE)) {
+            return;
+        }
+        let channel = format!("{topic}#{}", msgs::TWIST_TYPE);
+        if let Err(error) = lcm.publish(&channel, payload) {
+            eprintln!("lcm publish failed: {error}");
+        }
+    }
 }
 
 fn describe(transport: TransportChoice) -> &'static str {
     match transport {
-        TransportChoice::Both => "lcm + zenoh",
-        TransportChoice::Lcm => "lcm",
         TransportChoice::Zenoh => "zenoh",
+        _ => "zenoh + lcm mirror",
     }
 }
 
@@ -217,26 +301,33 @@ fn retry_delay(consecutive_failures: u32) -> Duration {
     Duration::from_secs(seconds.min(30))
 }
 
-fn spawn_lcm_receiver(hub: Arc<Hub>, url: lcm::LcmUrl, status: Arc<Mutex<Option<String>>>) {
+fn spawn_lcm_receiver(
+    hub: Arc<Hub>,
+    relay: Arc<LcmRelay>,
+    url: lcm::LcmUrl,
+    status: Arc<Mutex<Option<String>>>,
+) {
     std::thread::Builder::new()
         .name("lcm receive".to_owned())
         .spawn(move || {
             let mut consecutive_failures = 0;
             loop {
-                let sink_hub = Arc::clone(&hub);
                 let started = std::time::Instant::now();
                 let listening_status = Arc::clone(&status);
                 let result = lcm::run_receiver(
                     url,
                     |incoming| match incoming {
                         lcm::Incoming::Message { channel, payload } => {
-                            sink_hub.on_lcm_message(channel, payload)
+                            hub.on_lcm_message(channel, payload);
+                            relay.forward(channel, payload);
                         }
                         lcm::Incoming::Skipped { channel, bytes } => {
-                            sink_hub.record_skipped(Transport::Lcm, channel, bytes)
+                            hub.record_skipped(Transport::Lcm, channel, bytes);
+                            relay.note_skipped(channel);
                         }
                     },
-                    |channel| hub.wants_payload(channel),
+                    // Both are asked, so the relay hears about every channel.
+                    |channel| relay.wants_payload(channel) | hub.wants_payload(channel),
                     || *listening_status.lock().unwrap() = None,
                 );
                 if started.elapsed() > Duration::from_secs(60) {
@@ -255,7 +346,7 @@ fn spawn_lcm_receiver(hub: Arc<Hub>, url: lcm::LcmUrl, status: Arc<Mutex<Option<
         .expect("failed to spawn lcm thread");
 }
 
-fn spawn_rate_ticker(hub: Arc<Hub>) {
+fn spawn_ticker(hub: Arc<Hub>, relay: Arc<LcmRelay>) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(Duration::from_secs(1));
         let mut last = std::time::Instant::now();
@@ -263,49 +354,9 @@ fn spawn_rate_ticker(hub: Arc<Hub>) {
             ticker.tick().await;
             hub.tick_rates(last.elapsed());
             last = std::time::Instant::now();
+            relay.sweep();
         }
     });
-}
-
-/// Publishes at a fixed rate while a browser is connected, and keeps sending
-/// zeros for a moment after it leaves so the robot cannot inherit a stale command.
-async fn publish_commands(
-    hub: Arc<Hub>,
-    lcm_transport: Option<Arc<lcm::LcmTransport>>,
-    zenoh_session: Option<zenoh::Session>,
-) {
-    let mut stop_flush = 0;
-    loop {
-        let settings = hub.settings();
-        tokio::time::sleep(Duration::from_secs_f64(1.0 / settings.publish_hz)).await;
-
-        let (linear_x, linear_y, angular_z) = hub.current_command();
-        // Publishing zeros forever would fight whatever else drives this topic, so
-        // the stream goes quiet when nobody is steering. The stop still has to be
-        // heard though, so a second of zeros follows the last real input.
-        if linear_x != 0.0 || linear_y != 0.0 || angular_z != 0.0 {
-            stop_flush = settings.publish_hz as i32;
-        } else if stop_flush > 0 {
-            stop_flush -= 1;
-        } else {
-            continue;
-        }
-
-        let payload = msgs::encode_twist([linear_x, linear_y, 0.0], [0.0, 0.0, angular_z]);
-        let topic = &settings.publish_topic;
-        if let Some(transport) = &lcm_transport {
-            let channel = format!("{topic}#{}", msgs::TWIST_TYPE);
-            if let Err(error) = transport.publish(&channel, &payload) {
-                eprintln!("lcm publish failed: {error}");
-            }
-        }
-        if let Some(session) = &zenoh_session {
-            let key_expr = zenoh_io::key_expr_for(topic, msgs::TWIST_TYPE);
-            if let Err(error) = zenoh_io::put(session, key_expr, payload).await {
-                eprintln!("zenoh publish failed: {error}");
-            }
-        }
-    }
 }
 
 fn local_address() -> IpAddr {

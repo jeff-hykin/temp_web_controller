@@ -1,32 +1,18 @@
-use crate::image::{self, EncodedFrame, ImageFormat};
-use crate::msgs::{self, ImageMessage};
+use crate::image::{self, ImageFormat};
+use crate::msgs;
 use crate::record::{self, Compression, Recorder, RecordingStatus};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::watch;
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::{Duration, Instant};
 
-const MIN_QUALITY: u8 = 25;
-const MAX_QUALITY: u8 = 85;
-const MIN_WIDTH: usize = 320;
-
-/// Latency budget, measured from the sender's own stamp to the moment we are about
-/// to encode, so it covers the robot's pipeline and any backlog of ours. Driving is
-/// comfortable under 150 ms, visibly laggy past 300, and a frame half a second old
-/// is no longer worth the CPU to encode.
-const LATENCY_GOOD_MS: f64 = 150.0;
-const LATENCY_HIGH_MS: f64 = 300.0;
-const LATENCY_DROP_MS: f64 = 500.0;
-/// Past this the sender's clock disagrees with ours rather than the link being slow,
-/// and a skewed clock must not be allowed to pin quality to the floor forever.
-const MAX_PLAUSIBLE_LATENCY_MS: f64 = 10_000.0;
-/// Dropping every late frame would leave a permanently black tile when the delay is
-/// upstream of us, so the view still refreshes even while it is behind.
-const MAX_CONSECUTIVE_LATE_DROPS: u32 = 4;
+/// Camera quality is a percentage of the best a stream is sent at; zenoh-web turns
+/// it into resolution and bitrate. Below a tenth there is nothing left to look at.
+const MIN_QUALITY: u8 = 10;
+const MAX_QUALITY: u8 = 100;
+const MAX_CAMERA_HZ: f64 = 60.0;
 
 const TF_STALE: Duration = Duration::from_secs(10);
 const TF_FORGET: Duration = Duration::from_secs(120);
@@ -47,9 +33,16 @@ pub struct Settings {
     pub publish_hz: f64,
     pub deadman_ms: u64,
     pub invert_turn: bool,
+    /// Lets zenoh-web lower a camera's quality, down to a tenth, to fit the link.
+    /// Off pins every camera at `quality` and only its frame rate gives.
     pub auto_quality: bool,
+    /// The best quality a camera is sent at, in percent.
     pub quality: u8,
-    pub max_width: usize,
+    /// Caps every camera's frame rate. 0 sends as fast as the publisher does.
+    pub max_hz: f64,
+    /// When the link is short: 0 keeps the picture sharp and drops frames, 1 keeps
+    /// the frame rate and drops quality.
+    pub quality_to_hz_tradeoff: f64,
     pub record_compression: Compression,
     pub record_image_format: ImageFormat,
     pub record_dir: PathBuf,
@@ -65,8 +58,9 @@ impl Default for Settings {
             deadman_ms: 400,
             invert_turn: false,
             auto_quality: true,
-            quality: 70,
-            max_width: 960,
+            quality: 80,
+            max_hz: 0.0,
+            quality_to_hz_tradeoff: 0.5,
             record_compression: Compression::default(),
             record_image_format: ImageFormat::default(),
             record_dir: PathBuf::from("recordings"),
@@ -84,31 +78,21 @@ pub struct SettingsPatch {
     pub invert_turn: Option<bool>,
     pub auto_quality: Option<bool>,
     pub quality: Option<u8>,
-    pub max_width: Option<usize>,
+    pub max_hz: Option<f64>,
+    pub quality_to_hz_tradeoff: Option<f64>,
     pub record_compression: Option<Compression>,
     pub record_image_format: Option<ImageFormat>,
     pub record_dir: Option<String>,
 }
 
-#[derive(Clone, Copy)]
-pub struct Command {
-    pub forward: f64,
-    pub strafe: f64,
-    pub turn: f64,
-}
-
-impl Default for Command {
-    fn default() -> Self {
-        Command {
-            forward: 0.0,
-            strafe: 0.0,
-            turn: 0.0,
-        }
-    }
-}
-
 struct TopicRecord {
     msg_type: Option<String>,
+    /// Where a browser finds this topic on zenoh: its own key for a zenoh topic, the
+    /// relay's for an lcm one.
+    key: String,
+    /// An image's pixel encoding, once a frame has been read, so the page can tell
+    /// depth from colour without fetching one.
+    encoding: Option<String>,
     transport: Transport,
     messages: u64,
     window_messages: u64,
@@ -122,6 +106,8 @@ struct TopicRecord {
 #[derive(Serialize)]
 pub struct TopicView {
     pub topic: String,
+    pub key: String,
+    pub encoding: Option<String>,
     pub msg_type: Option<String>,
     pub transport: Transport,
     pub is_image: bool,
@@ -132,32 +118,6 @@ pub struct TopicView {
     pub recorded: bool,
     pub is_rpc: bool,
     pub unclassifiable: u64,
-}
-
-#[derive(Serialize, Clone, Default)]
-pub struct StreamStats {
-    pub source_fps: f64,
-    pub stream_fps: f64,
-    /// What one viewer's socket actually swallowed. A client on weak wifi sits far
-    /// below `stream_fps`, and that gap is invisible in every other number here.
-    pub client_fps: f64,
-    /// What the browser managed to draw, which it reports back because nothing on
-    /// this side can see a phone whose jpeg decoder is the bottleneck. `None` until
-    /// a viewer has said.
-    pub painted_fps: Option<f64>,
-    pub dropped: u64,
-    pub quality: u8,
-    pub max_width: usize,
-    pub encode_ms: f64,
-    pub jpeg_bytes: usize,
-    pub width: usize,
-    pub height: usize,
-    pub passthrough: bool,
-    /// Age of the frame against the sender's clock. `None` when the publisher does
-    /// not stamp its frames or its clock disagrees with ours.
-    pub latency_ms: Option<f64>,
-    pub late_dropped: u64,
-    pub error: Option<String>,
 }
 
 struct TfEdgeRecord {
@@ -183,48 +143,9 @@ pub struct TfView {
     pub warnings: Vec<String>,
 }
 
-struct Pending {
-    msg_type: String,
-    payload: Vec<u8>,
-}
-
-pub struct Stream {
-    viewers: AtomicUsize,
-    running: AtomicBool,
-    slot: Mutex<Option<Pending>>,
-    ready: Condvar,
-    frames: watch::Sender<Option<Arc<EncodedFrame>>>,
-    stats: Mutex<StreamStats>,
-    arrived: AtomicUsize,
-    encoded: AtomicUsize,
-    dropped: AtomicUsize,
-    delivered: AtomicUsize,
-    painted: Mutex<Option<(Instant, f64)>>,
-}
-
-impl Stream {
-    pub fn subscribe(&self) -> watch::Receiver<Option<Arc<EncodedFrame>>> {
-        self.frames.subscribe()
-    }
-
-    pub fn on_delivered(&self) {
-        self.delivered.fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn report_painted(&self, fps: f64) {
-        *self.painted.lock().unwrap() = Some((Instant::now(), fps));
-    }
-
-    pub fn stats(&self) -> StreamStats {
-        self.stats.lock().unwrap().clone()
-    }
-}
-
 pub struct Hub {
     topics: Mutex<HashMap<String, TopicRecord>>,
-    streams: RwLock<HashMap<String, Arc<Stream>>>,
     settings: Mutex<Settings>,
-    command: Mutex<(Command, Instant)>,
     tf: Mutex<HashMap<(String, String), TfEdgeRecord>>,
     recorder: Mutex<Option<Recorder>>,
     /// Only topics somebody actually toggled, so a topic that appears
@@ -236,9 +157,7 @@ impl Hub {
     pub fn new(settings: Settings) -> Arc<Self> {
         Arc::new(Hub {
             topics: Mutex::new(HashMap::new()),
-            streams: RwLock::new(HashMap::new()),
             settings: Mutex::new(settings),
-            command: Mutex::new((Command::default(), Instant::now())),
             tf: Mutex::new(HashMap::new()),
             recorder: Mutex::new(None),
             recording_overrides: RwLock::new(HashMap::new()),
@@ -275,8 +194,11 @@ impl Hub {
         if let Some(value) = patch.quality {
             settings.quality = value.clamp(MIN_QUALITY, MAX_QUALITY);
         }
-        if let Some(value) = patch.max_width {
-            settings.max_width = value.clamp(MIN_WIDTH, 1920);
+        if let Some(value) = patch.max_hz.filter(|value| value.is_finite()) {
+            settings.max_hz = value.clamp(0.0, MAX_CAMERA_HZ);
+        }
+        if let Some(value) = patch.quality_to_hz_tradeoff.filter(|value| value.is_finite()) {
+            settings.quality_to_hz_tradeoff = value.clamp(0.0, 1.0);
         }
         if let Some(value) = patch.record_compression {
             settings.record_compression = value;
@@ -290,32 +212,10 @@ impl Hub {
         settings.clone()
     }
 
-    pub fn set_command(&self, command: Command) {
-        *self.command.lock().unwrap() = (command, Instant::now());
-    }
-
-    /// The command to publish right now, or zeros once the client has gone quiet.
-    pub fn current_command(&self) -> (f64, f64, f64) {
-        let settings = self.settings();
-        let (command, received) = *self.command.lock().unwrap();
-        if received.elapsed() > Duration::from_millis(settings.deadman_ms) {
-            return (0.0, 0.0, 0.0);
-        }
-        let turn_sign = if settings.invert_turn { 1.0 } else { -1.0 };
-        (
-            command.forward.clamp(-1.0, 1.0) * settings.linear_speed,
-            // The browser sends screen-space axes where right is positive, but
-            // REP-103 puts +y to the left and +yaw counter-clockwise, so both flip
-            // here rather than in three separate places in the frontend.
-            -command.strafe.clamp(-1.0, 1.0) * settings.linear_speed,
-            command.turn.clamp(-1.0, 1.0) * settings.angular_speed * turn_sign,
-        )
-    }
-
-    /// A browser that closed its socket cannot steer any more, and the last thing
-    /// it sent may well have been a drive command.
-    pub fn on_control_disconnect(&self) {
-        self.set_command(Command::default());
+    /// Whether `topic` is the one browsers drive on, which the lcm relay must leave
+    /// alone: web_ctrl mirrors it onto lcm itself, and relaying that back would loop.
+    pub fn is_command_topic(&self, topic: &str) -> bool {
+        normalize(&self.settings.lock().unwrap().publish_topic) == normalize(topic)
     }
 
     pub fn wants_payload(&self, channel: &str) -> bool {
@@ -323,16 +223,9 @@ impl Hub {
         if msg_type.as_deref() == Some(msgs::TF_TYPE) {
             return true;
         }
-        // A recording must be complete, so the viewer-based drop optimization
-        // is suspended for whatever the recording is actually capturing.
-        if self.is_recording() && self.is_topic_recorded(&topic) {
-            return true;
-        }
-        self.streams
-            .read()
-            .unwrap()
-            .get(&topic)
-            .is_some_and(|stream| stream.viewers.load(Ordering::Relaxed) > 0)
+        // A recording must be complete, so the drop optimization is suspended for
+        // whatever the recording is actually capturing.
+        self.is_recording() && self.is_topic_recorded(&topic)
     }
 
     pub fn is_recording(&self) -> bool {
@@ -404,27 +297,29 @@ impl Hub {
 
     pub fn record_skipped(&self, transport: Transport, channel: &str, bytes: usize) {
         let (topic, msg_type) = parse_lcm_channel(channel);
-        self.touch(transport, topic, msg_type, bytes, false);
+        let key = lcm_relay_key(&topic, msg_type.as_deref());
+        self.touch(transport, topic, key, msg_type, None, bytes, false);
     }
 
     pub fn on_lcm_message(&self, channel: &str, payload: &[u8]) {
         let (topic, msg_type) = parse_lcm_channel(channel);
-        self.ingest(Transport::Lcm, topic, msg_type, payload);
+        let key = lcm_relay_key(&topic, msg_type.as_deref());
+        self.ingest(Transport::Lcm, topic, key, msg_type, payload);
     }
 
     pub fn on_zenoh_message(&self, key_expr: &str, payload: &[u8]) {
         let (topic, msg_type) = parse_zenoh_key(key_expr);
-        self.ingest(Transport::Zenoh, topic, msg_type, payload);
+        self.ingest(Transport::Zenoh, topic, key_expr.to_owned(), msg_type, payload);
     }
 
     fn ingest(
         &self,
         transport: Transport,
         topic: String,
+        key: String,
         msg_type: Option<String>,
         payload: &[u8],
     ) {
-        let is_image = msg_type.as_deref().is_some_and(msgs::is_image_type);
         let parts = match msg_type.as_deref() {
             Some(msgs::IMAGE_TYPE) => msgs::read_raw_image(payload).ok(),
             _ => None,
@@ -435,7 +330,9 @@ impl Hub {
         let first_bad_frame = self.touch(
             transport,
             topic.clone(),
+            key,
             msg_type.clone(),
+            parts.as_ref().map(|parts| parts.encoding.to_owned()),
             payload.len(),
             unclassifiable,
         );
@@ -457,27 +354,6 @@ impl Hub {
                 recorder.offer(&topic, msg_type.as_deref(), payload);
             }
         }
-        if !is_image {
-            return;
-        }
-        let stream = self.streams.read().unwrap().get(&topic).cloned();
-        let Some(stream) = stream else {
-            return;
-        };
-        if stream.viewers.load(Ordering::Relaxed) == 0 {
-            return;
-        }
-        stream.arrived.fetch_add(1, Ordering::Relaxed);
-        let mut slot = stream.slot.lock().unwrap();
-        if slot.is_some() {
-            stream.dropped.fetch_add(1, Ordering::Relaxed);
-        }
-        *slot = Some(Pending {
-            msg_type: msg_type.unwrap_or_default(),
-            payload: payload.to_vec(),
-        });
-        drop(slot);
-        stream.ready.notify_one();
     }
 
     fn record_tf(&self, topic: &str, payload: &[u8]) {
@@ -595,17 +471,22 @@ impl Hub {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn touch(
         &self,
         transport: Transport,
         topic: String,
+        key: String,
         msg_type: Option<String>,
+        encoding: Option<String>,
         bytes: usize,
         unclassifiable: bool,
     ) -> bool {
         let mut topics = self.topics.lock().unwrap();
         let record = topics.entry(topic).or_insert_with(|| TopicRecord {
             msg_type: msg_type.clone(),
+            key: key.clone(),
+            encoding: None,
             transport,
             messages: 0,
             window_messages: 0,
@@ -621,6 +502,10 @@ impl Hub {
             record.msg_type = msg_type;
         }
         record.transport = transport;
+        record.key = key;
+        if encoding.is_some() {
+            record.encoding = encoding;
+        }
         record.messages += 1;
         record.window_messages += 1;
         record.window_bytes += bytes as u64;
@@ -645,6 +530,8 @@ impl Hub {
             .iter()
             .map(|(topic, record)| TopicView {
                 topic: topic.clone(),
+                key: record.key.clone(),
+                encoding: record.encoding.clone(),
                 msg_type: record.msg_type.clone(),
                 transport: record.transport,
                 is_image: record.msg_type.as_deref().is_some_and(msgs::is_image_type),
@@ -663,292 +550,6 @@ impl Hub {
         views
     }
 
-    pub fn stream_stats(&self) -> HashMap<String, StreamStats> {
-        self.streams
-            .read()
-            .unwrap()
-            .iter()
-            .filter(|(_, stream)| stream.viewers.load(Ordering::Relaxed) > 0)
-            .map(|(topic, stream)| (topic.clone(), stream.stats()))
-            .collect()
-    }
-
-    /// Attach a viewer, starting the encoder thread if this is the first one.
-    pub fn open_stream(self: &Arc<Self>, topic: &str) -> Arc<Stream> {
-        let topic = normalize(topic);
-        let mut streams = self.streams.write().unwrap();
-        let stream = streams
-            .entry(topic.clone())
-            .or_insert_with(|| {
-                let (frames, _) = watch::channel(None);
-                Arc::new(Stream {
-                    viewers: AtomicUsize::new(0),
-                    running: AtomicBool::new(false),
-                    slot: Mutex::new(None),
-                    ready: Condvar::new(),
-                    frames,
-                    stats: Mutex::new(StreamStats::default()),
-                    arrived: AtomicUsize::new(0),
-                    encoded: AtomicUsize::new(0),
-                    dropped: AtomicUsize::new(0),
-                    delivered: AtomicUsize::new(0),
-                    painted: Mutex::new(None),
-                })
-            })
-            .clone();
-        stream.viewers.fetch_add(1, Ordering::Relaxed);
-        if !stream.running.swap(true, Ordering::SeqCst) {
-            let hub = Arc::clone(self);
-            let encoder_stream = Arc::clone(&stream);
-            std::thread::Builder::new()
-                .name(format!("encode {topic}"))
-                .spawn(move || run_encoder(hub, encoder_stream))
-                .expect("failed to spawn encoder thread");
-        }
-        stream
-    }
-
-    pub fn report_painted(&self, topic: &str, fps: f64) {
-        if let Some(stream) = self.streams.read().unwrap().get(&normalize(topic)) {
-            stream.report_painted(fps);
-        }
-    }
-
-    pub fn close_stream(&self, stream: &Arc<Stream>) {
-        stream.viewers.fetch_sub(1, Ordering::Relaxed);
-        stream.ready.notify_all();
-    }
-}
-
-fn run_encoder(hub: Arc<Hub>, stream: Arc<Stream>) {
-    let mut quality = hub.settings().quality;
-    let mut max_width = hub.settings().max_width;
-    let mut window_start = Instant::now();
-    let mut healthy_windows = 0;
-    let mut consecutive_late_drops = 0;
-    loop {
-        let pending = {
-            let mut slot = stream.slot.lock().unwrap();
-            while slot.is_none() {
-                if stream.viewers.load(Ordering::Relaxed) == 0 {
-                    stream.running.store(false, Ordering::SeqCst);
-                    return;
-                }
-                // Rates are rolled here as well as after a frame, or a publisher
-                // that stops leaves its last window standing and /api/status keeps
-                // reporting the fps it had when it died.
-                if window_start.elapsed() >= Duration::from_secs(1) {
-                    roll_window(&stream, &mut window_start);
-                }
-                let (guard, _) = stream
-                    .ready
-                    .wait_timeout(slot, Duration::from_millis(250))
-                    .unwrap();
-                slot = guard;
-            }
-            slot.take().unwrap()
-        };
-
-        let settings = hub.settings();
-        if !settings.auto_quality {
-            quality = settings.quality;
-            max_width = settings.max_width;
-        }
-
-        let started = Instant::now();
-        let decoded = msgs::decode_any_image(&pending.msg_type, &pending.payload);
-        let latency_ms = decoded.as_ref().ok().and_then(frame_age_ms);
-
-        // Encoding a frame this old only pushes the next one further behind, so the
-        // backlog is thrown away rather than worked through. Unwinding the LCM
-        // message above is cheap; the scale and jpeg encode below are not.
-        let too_late = latency_ms.is_some_and(|age| age > LATENCY_DROP_MS)
-            && consecutive_late_drops < MAX_CONSECUTIVE_LATE_DROPS;
-        if too_late {
-            consecutive_late_drops += 1;
-            let mut stats = stream.stats.lock().unwrap();
-            stats.latency_ms = latency_ms;
-            stats.late_dropped += 1;
-            continue;
-        }
-        consecutive_late_drops = 0;
-
-        // A latency spike is answered on the frame that shows it rather than at the
-        // next one-second window, which is far too slow to catch up from.
-        if settings.auto_quality && latency_ms.is_some_and(|age| age > LATENCY_HIGH_MS) {
-            healthy_windows = 0;
-            if quality > MIN_QUALITY {
-                quality = quality.saturating_sub(20).max(MIN_QUALITY);
-            } else if max_width > MIN_WIDTH {
-                max_width = (max_width / 2).max(MIN_WIDTH);
-            }
-        }
-
-        let outcome = match decoded {
-            Ok(ImageMessage::Compressed(compressed)) => {
-                image::encode_compressed(&compressed, quality, max_width)
-            }
-            Ok(ImageMessage::Raw(raw)) => image::encode(&raw, quality, max_width),
-            Err(error) => Err(error),
-        };
-
-        let mut stats = stream.stats.lock().unwrap();
-        match outcome {
-            Ok(frame) => {
-                stats.encode_ms = started.elapsed().as_secs_f64() * 1000.0;
-                stats.jpeg_bytes = frame.jpeg.len();
-                stats.width = frame.width;
-                stats.height = frame.height;
-                stats.passthrough = frame.passthrough;
-                stats.quality = quality;
-                stats.max_width = max_width;
-                stats.latency_ms = latency_ms;
-                stats.error = None;
-                drop(stats);
-                stream.encoded.fetch_add(1, Ordering::Relaxed);
-                let _ = stream.frames.send(Some(Arc::new(frame)));
-            }
-            Err(error) => {
-                stats.error = Some(error.to_string());
-                drop(stats);
-            }
-        }
-
-        if window_start.elapsed() >= Duration::from_secs(1) {
-            let window = roll_window(&stream, &mut window_start);
-
-            if hub.settings().auto_quality {
-                // Throughput alone would climb straight back into a latency spike,
-                // since a backlog can be drained at full rate and still be a second old.
-                let prompt = latency_ms.is_none_or(|age| age < LATENCY_GOOD_MS);
-                let encoding_keeps_up =
-                    prompt && (window.arrived == 0 || window.encoded as f64 >= window.arrived as f64 * 0.9);
-                let (viewer_share, limit) = window.viewer_shortfall();
-                if encoding_keeps_up && viewer_share >= VIEWER_TARGET_SHARE {
-                    healthy_windows += 1;
-                    if healthy_windows >= 3 {
-                        healthy_windows = 0;
-                        if max_width < hub.settings().max_width {
-                            max_width = (max_width * 2).min(hub.settings().max_width);
-                        } else if quality < MAX_QUALITY {
-                            quality = (quality + 5).min(MAX_QUALITY);
-                        }
-                    }
-                } else {
-                    healthy_windows = 0;
-                    // Cut in proportion to how far behind the viewer is: a browser
-                    // getting a fifth of the frames needs a step it can feel this
-                    // second, not six windows of shaving ten off the quality.
-                    let cut = (30.0 * (1.0 - viewer_share)).round().max(10.0) as u8;
-                    match limit {
-                        // The link cannot carry the bytes, so make them smaller.
-                        ViewerLimit::Link if quality > MIN_QUALITY => {
-                            quality = quality.saturating_sub(cut).max(MIN_QUALITY);
-                        }
-                        // Bytes arrive fine and the decoder is what cannot keep up,
-                        // so there are fewer pixels to spend, not fewer bits.
-                        ViewerLimit::Decode if max_width > MIN_WIDTH => {
-                            max_width = (max_width / 2).max(MIN_WIDTH);
-                        }
-                        _ if quality > MIN_QUALITY => {
-                            quality = quality.saturating_sub(cut).max(MIN_QUALITY);
-                        }
-                        _ => max_width = (max_width / 2).max(MIN_WIDTH),
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// How much of what we encode a viewer has to actually see before the stream counts
-/// as healthy. Below this the controller gives up quality to close the gap.
-const VIEWER_TARGET_SHARE: f64 = 0.9;
-const PAINTED_REPORT_STALE: Duration = Duration::from_secs(3);
-
-enum ViewerLimit {
-    Link,
-    Decode,
-    None,
-}
-
-struct Window {
-    arrived: usize,
-    encoded: usize,
-    delivered: usize,
-    painted_fps: Option<f64>,
-    elapsed: f64,
-}
-
-impl Window {
-    /// The fraction of encoded frames the viewer actually got, and which side of the
-    /// wire lost the rest.
-    fn viewer_shortfall(&self) -> (f64, ViewerLimit) {
-        if self.encoded == 0 {
-            return (1.0, ViewerLimit::None);
-        }
-        let encoded_fps = self.encoded as f64 / self.elapsed;
-        let delivered_fps = self.delivered as f64 / self.elapsed;
-        let seen_fps = match self.painted_fps {
-            Some(painted) => painted.min(delivered_fps),
-            None => delivered_fps,
-        };
-        let share = (seen_fps / encoded_fps).clamp(0.0, 1.0);
-        let limit = if share >= VIEWER_TARGET_SHARE {
-            ViewerLimit::None
-        } else if delivered_fps < encoded_fps * VIEWER_TARGET_SHARE {
-            ViewerLimit::Link
-        } else {
-            ViewerLimit::Decode
-        };
-        (share, limit)
-    }
-}
-
-/// Closes the one-second measurement window and publishes the rates. Called both
-/// after a frame and while idling, so a publisher that stops cannot leave its last
-/// window standing.
-fn roll_window(stream: &Stream, window_start: &mut Instant) -> Window {
-    let elapsed = window_start.elapsed().as_secs_f64();
-    let arrived = stream.arrived.swap(0, Ordering::Relaxed);
-    let encoded = stream.encoded.swap(0, Ordering::Relaxed);
-    let dropped = stream.dropped.swap(0, Ordering::Relaxed) as u64;
-    let viewers = stream.viewers.load(Ordering::Relaxed).max(1);
-    let delivered = stream.delivered.swap(0, Ordering::Relaxed) / viewers;
-    // A viewer that stopped reporting must stop steering the controller, or a tab
-    // that was closed mid-struggle pins the quality down for everyone after it.
-    let painted_fps = stream
-        .painted
-        .lock()
-        .unwrap()
-        .filter(|(at, _)| at.elapsed() < PAINTED_REPORT_STALE)
-        .map(|(_, fps)| fps);
-    let mut stats = stream.stats.lock().unwrap();
-    stats.source_fps = arrived as f64 / elapsed;
-    stats.stream_fps = encoded as f64 / elapsed;
-    stats.client_fps = delivered as f64 / elapsed;
-    stats.painted_fps = painted_fps;
-    stats.dropped += dropped;
-    drop(stats);
-    *window_start = Instant::now();
-    Window { arrived, encoded, delivered, painted_fps, elapsed }
-}
-
-/// How far behind the sender's own stamp this frame is. `None` when there is no
-/// usable stamp, which must not read as "zero latency": an unstamped publisher
-/// sends zeros, and a sender whose clock is ahead of ours produces a negative age.
-/// Both would otherwise drive the controller off a number that means nothing.
-fn frame_age_ms(message: &ImageMessage) -> Option<f64> {
-    let header = match message {
-        ImageMessage::Raw(image) => &image.header,
-        ImageMessage::Compressed(image) => &image.header,
-    };
-    if header.stamp_sec <= 0 || header.stamp_nsec < 0 {
-        return None;
-    }
-    let stamped = UNIX_EPOCH + Duration::new(header.stamp_sec as u64, header.stamp_nsec as u32);
-    let age = SystemTime::now().duration_since(stamped).ok()?.as_secs_f64() * 1000.0;
-    (age < MAX_PLAUSIBLE_LATENCY_MS).then_some(age)
 }
 
 pub fn normalize(topic: &str) -> String {
@@ -1005,6 +606,15 @@ pub fn parse_lcm_channel(channel: &str) -> (String, Option<String>) {
     match channel.rsplit_once('#') {
         Some((topic, msg_type)) => (normalize(topic), Some(msg_type.to_owned())),
         None => (normalize(channel), None),
+    }
+}
+
+/// The zenoh key the lcm relay republishes a channel on: the same key dimos itself
+/// would use for that channel on its zenoh transport (`dimos/<name>/<msg_name>`).
+pub fn lcm_relay_key(topic: &str, msg_type: Option<&str>) -> String {
+    match msg_type {
+        Some(msg_type) => format!("dimos/{}/{msg_type}", normalize(topic)),
+        None => format!("dimos/{}", normalize(topic)),
     }
 }
 
@@ -1130,7 +740,8 @@ mod tests {
             invert_turn: None,
             auto_quality: None,
             quality: None,
-            max_width: None,
+            max_hz: None,
+            quality_to_hz_tradeoff: None,
             record_compression: None,
             record_image_format: None,
             record_dir: None,
@@ -1138,59 +749,49 @@ mod tests {
     }
 
     #[test]
-    fn commands_scale_by_the_configured_speeds() {
-        let hub = Hub::new(Settings::default());
-        hub.set_command(Command {
-            forward: 1.0,
-            strafe: 0.0,
-            turn: -0.5,
-        });
-        let (linear_x, _, angular_z) = hub.current_command();
-        assert!((linear_x - 0.25).abs() < 1e-9);
-        assert!((angular_z - 0.25).abs() < 1e-9);
-    }
-
-    /// dimos's own keyboard teleop sends `angular.z = +speed` for A and
-    /// `linear.y = +speed` for Q, so screen-right has to leave here negative or
-    /// the robot turns and strafes the opposite way from every other teleop source.
-    #[test]
-    fn screen_right_turns_and_strafes_right_in_rep_103() {
-        let hub = Hub::new(Settings::default());
-        hub.set_command(Command {
-            forward: 0.0,
-            strafe: 1.0,
-            turn: 1.0,
-        });
-        let (_, linear_y, angular_z) = hub.current_command();
-        assert!(linear_y < 0.0);
-        assert!(angular_z < 0.0);
-    }
-
-    #[test]
-    fn a_stale_command_becomes_zero() {
-        let hub = Hub::new(
-            Settings {
-                deadman_ms: 100,
-                ..Settings::default()
-            },
-        );
-        hub.set_command(Command {
-            forward: 1.0,
-            strafe: 0.0,
-            turn: 1.0,
-        });
-        std::thread::sleep(Duration::from_millis(150));
-        assert_eq!(hub.current_command(), (0.0, 0.0, 0.0));
-    }
-
-    #[test]
-    fn only_watched_image_topics_are_wanted() {
-        let hub = Hub::new(Settings::default());
+    fn only_recorded_topics_are_wanted_while_recording() {
+        let root = std::env::temp_dir().join(format!("web_ctrl_wants_{}", std::process::id()));
+        let hub = Hub::new(Settings { record_dir: root.clone(), ..Settings::default() });
         assert!(!hub.wants_payload("/image#sensor_msgs.Image"));
-        let stream = hub.open_stream("/image");
+        assert!(hub.wants_payload("/tf#tf2_msgs.TFMessage"), "tf is always decoded");
+        hub.start_recording(Some("wants.mcap")).unwrap();
         assert!(hub.wants_payload("/image#sensor_msgs.Image"));
-        hub.close_stream(&stream);
+        hub.set_topic_recorded("image", false);
         assert!(!hub.wants_payload("/image#sensor_msgs.Image"));
+        hub.stop_recording().unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn lcm_topics_point_browsers_at_the_relay_key_and_zenoh_topics_at_their_own() {
+        let hub = Hub::new(Settings::default());
+        hub.on_lcm_message("/odom#nav_msgs.Odometry", &[0; 8]);
+        hub.on_zenoh_message("dimos/scan/sensor_msgs.LaserScan", &[0; 8]);
+        let keys: Vec<(String, String)> =
+            hub.topic_views().into_iter().map(|view| (view.topic, view.key)).collect();
+        assert_eq!(
+            keys,
+            vec![
+                ("dimos/scan".to_owned(), "dimos/scan/sensor_msgs.LaserScan".to_owned()),
+                ("odom".to_owned(), "dimos/odom/nav_msgs.Odometry".to_owned()),
+            ]
+        );
+        assert_eq!(lcm_relay_key("/untyped", None), "dimos/untyped");
+    }
+
+    #[test]
+    fn an_image_topic_reports_its_pixel_encoding() {
+        let hub = Hub::new(Settings::default());
+        hub.on_lcm_message("/depth#sensor_msgs.Image", &image_payload(2, 2, 4, "16UC1", &[0u8; 8]));
+        assert_eq!(hub.topic_views()[0].encoding.as_deref(), Some("16UC1"));
+    }
+
+    #[test]
+    fn the_command_topic_is_recognised_with_or_without_its_slash() {
+        let hub = Hub::new(Settings { publish_topic: "/tele_cmd_vel_test".to_owned(), ..Settings::default() });
+        assert!(hub.is_command_topic("tele_cmd_vel_test"));
+        assert!(hub.is_command_topic("/tele_cmd_vel_test"));
+        assert!(!hub.is_command_topic("tele_cmd_vel"));
     }
 
     #[test]
@@ -1278,33 +879,6 @@ mod tests {
         assert_eq!(views.len(), 1);
         assert_eq!(views[0].unclassifiable, 2);
         assert_eq!(views[0].messages, 3);
-    }
-
-    /// Every one of these returns `None` rather than a number, because a bogus age
-    /// would be read as real latency and would pin the encoder's quality to the floor
-    /// for as long as the publisher kept sending.
-    #[test]
-    fn only_a_plausible_sender_stamp_produces_a_latency() {
-        let stamped = |stamp_sec: i32, stamp_nsec: i32| {
-            frame_age_ms(&ImageMessage::Raw(msgs::RawImage {
-                header: msgs::Header { stamp_sec, stamp_nsec, frame_id: String::new() },
-                width: 1,
-                height: 1,
-                step: 1,
-                is_bigendian: 0,
-                encoding: "mono8".into(),
-                data: vec![0],
-            }))
-        };
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-        let seconds = now.as_secs() as i32;
-        assert!(stamped(0, 0).is_none(), "an unstamped publisher must not read as zero latency");
-        assert!(stamped(-1, 0).is_none());
-        assert!(stamped(seconds, -1).is_none());
-        assert!(stamped(seconds + 60, 0).is_none(), "a sender clock ahead of ours is skew, not latency");
-        assert!(stamped(seconds - 3600, 0).is_none(), "an hour behind is skew, not a link we can recover");
-        let age = stamped(seconds - 1, now.subsec_nanos() as i32).expect("a one second old frame is plausible");
-        assert!((age - 1000.0).abs() < 100.0, "expected about 1000 ms, got {age}");
     }
 
     fn image_payload(width: i32, height: i32, step: i32, encoding: &str, data: &[u8]) -> Vec<u8> {

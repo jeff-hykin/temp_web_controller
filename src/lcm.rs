@@ -12,6 +12,9 @@ const MAGIC_LONG: u32 = 0x4c43_3033;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
 const FRAGMENT_TIMEOUT: Duration = Duration::from_secs(2);
 const RECEIVE_BUFFER_BYTES: usize = 16 * 1024 * 1024;
+/// What lcm-python and lcm-c send unfragmented, and the payload of each fragment.
+const MAX_SHORT_PACKET_BYTES: usize = 65_499;
+const FRAGMENT_PAYLOAD_BYTES: usize = 65_499 - 20;
 
 pub const DEFAULT_URL: &str = "udpm://239.255.76.67:7667?ttl=0";
 
@@ -67,19 +70,53 @@ impl LcmTransport {
     }
 
     pub fn publish(&self, channel: &str, payload: &[u8]) -> Result<()> {
-        if channel.len() + payload.len() + 9 > 65_000 {
-            bail!("publishing fragmented lcm messages is not supported");
-        }
         let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+        for packet in packets(channel, payload, sequence)? {
+            self.socket.send_to(&packet, self.destination)?;
+        }
+        Ok(())
+    }
+}
+
+/// The datagrams one message travels in: a single short packet when it fits, else
+/// lcm's fragments, the first of which carries the channel name.
+fn packets(channel: &str, payload: &[u8], sequence: u32) -> Result<Vec<Vec<u8>>> {
+    if channel.len() + payload.len() + 9 <= MAX_SHORT_PACKET_BYTES {
         let mut packet = Vec::with_capacity(channel.len() + payload.len() + 9);
         packet.extend_from_slice(&MAGIC_SHORT.to_be_bytes());
         packet.extend_from_slice(&sequence.to_be_bytes());
         packet.extend_from_slice(channel.as_bytes());
         packet.push(0);
         packet.extend_from_slice(payload);
-        self.socket.send_to(&packet, self.destination)?;
-        Ok(())
+        return Ok(vec![packet]);
     }
+    if payload.len() > MAX_MESSAGE_BYTES {
+        bail!("{} bytes is more than an lcm message can carry", payload.len());
+    }
+    let first_capacity = FRAGMENT_PAYLOAD_BYTES - channel.len() - 1;
+    let rest = payload.len().saturating_sub(first_capacity);
+    let fragment_count = 1 + rest.div_ceil(FRAGMENT_PAYLOAD_BYTES);
+    let mut packets = Vec::with_capacity(fragment_count);
+    let mut offset = 0;
+    for fragment_number in 0..fragment_count {
+        let capacity = if fragment_number == 0 { first_capacity } else { FRAGMENT_PAYLOAD_BYTES };
+        let chunk = &payload[offset..(offset + capacity).min(payload.len())];
+        let mut packet = Vec::with_capacity(20 + channel.len() + 1 + chunk.len());
+        packet.extend_from_slice(&MAGIC_LONG.to_be_bytes());
+        packet.extend_from_slice(&sequence.to_be_bytes());
+        packet.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        packet.extend_from_slice(&(offset as u32).to_be_bytes());
+        packet.extend_from_slice(&(fragment_number as u16).to_be_bytes());
+        packet.extend_from_slice(&(fragment_count as u16).to_be_bytes());
+        if fragment_number == 0 {
+            packet.extend_from_slice(channel.as_bytes());
+            packet.push(0);
+        }
+        packet.extend_from_slice(chunk);
+        packets.push(packet);
+        offset += chunk.len();
+    }
+    Ok(packets)
 }
 
 struct PartialMessage {
@@ -324,6 +361,27 @@ mod tests {
 
         assert_eq!(received.into_inner(), vec![("/depth#sensor_msgs.Image".to_owned(), 4000)]);
         assert!(partials.is_empty());
+    }
+
+    #[test]
+    fn a_large_published_message_reassembles_on_the_receiving_side() {
+        let channel = "/camera#sensor_msgs.Image";
+        let payload: Vec<u8> = (0..230_400u32).map(|index| (index * 7) as u8).collect();
+        let fragments = packets(channel, &payload, 3).unwrap();
+        assert_eq!(fragments.len(), 4);
+        assert!(fragments.iter().all(|packet| packet.len() <= MAX_SHORT_PACKET_BYTES));
+        let mut partials = HashMap::new();
+        let received = RefCell::new(Vec::new());
+        let sink = |incoming: Incoming| {
+            if let Incoming::Message { channel, payload } = incoming {
+                received.borrow_mut().push((channel.to_owned(), payload.to_vec()));
+            }
+        };
+        let source = SocketAddr::from(([127, 0, 0, 1], 7667));
+        for packet in &fragments {
+            handle_packet(packet, source, &sink, &|_| true, &mut partials);
+        }
+        assert_eq!(received.into_inner(), vec![(channel.to_owned(), payload)]);
     }
 
     #[test]

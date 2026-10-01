@@ -1,0 +1,37 @@
+#!/usr/bin/env -S deno run --allow-all
+// Bundles zenoh-web's browser client, at the rev Cargo.toml pins, into
+// web/vendor/zenoh_web.js. web_ctrl compiles that file in and serves it, so the
+// page works on a robot with no internet. Run it whenever the zenoh-web rev changes.
+
+import { $ } from "https://esm.sh/dax-sh@0.42.0"
+
+const repoRoot = $.path(import.meta.url).parentOrThrow().parentOrThrow()
+const cargoToml = repoRoot.join("Cargo.toml").readTextSync()
+const rev = cargoToml.match(/zenoh-web = \{[^}]*rev = "([0-9a-f]+)"/)?.[1]
+if (!rev) {
+    throw new Error("no zenoh-web rev pinned in Cargo.toml")
+}
+
+const checkout = $.path(await Deno.makeTempDir({ prefix: "zenoh_web_client_" }))
+try {
+    await $`git clone --quiet --filter=blob:none https://github.com/jeff-hykin/zenoh-web ${checkout}`
+    await $`git -C ${checkout} checkout --quiet ${rev}`
+    const bundled = checkout.join("zenoh_web.js")
+    // Deno.Command rather than dax: inside dax `deno bundle` resolved to `deno run bundle`
+    const { code } = await new Deno.Command(Deno.execPath(), {
+        args: ["bundle", "--quiet", "--platform", "browser", "-o", bundled.toString(), checkout.join("client/zenoh_web.ts").toString()],
+        stdout: "inherit",
+        stderr: "inherit",
+    }).output()
+    if (code !== 0) {
+        throw new Error(`deno bundle failed with exit code ${code}`)
+    }
+    const header = `// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@${rev} by run/vendor_zenoh_web. Do not edit.\n`
+    const target = repoRoot.join("web/vendor/zenoh_web.js")
+    // esbuild names each source by its path, which here is a random temp directory
+    const body = bundled.readTextSync().replace(/^\/\/ .*zenoh_web_client_[^/]+\//gm, "// zenoh-web/")
+    target.writeTextSync(header + body)
+    console.log(`wrote ${target} (zenoh-web ${rev.slice(0, 7)})`)
+} finally {
+    await Deno.remove(checkout.toString(), { recursive: true })
+}

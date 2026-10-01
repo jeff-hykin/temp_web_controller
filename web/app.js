@@ -1,9 +1,16 @@
+import { connect, Priority } from "/vendor/zenoh_web.js"
+
 const element = (id) => document.getElementById(id)
 
 const state = {
     settings: null,
+    /// zenoh keys of the cameras open as tiles
     watching: new Set(),
     tiles: new Map(),
+    /// every camera the page knows of, by zenoh key: `{ key, label, msgType, encoding, rate }`
+    cameras: new Map(),
+    /// status topics by zenoh key, for rates and the names web_ctrl gives them
+    topicsByKey: new Map(),
     axes: { forward: 0, strafe: 0, turn: 0 },
     keys: new Set(),
     pad: { active: false, x: 0, y: 0 },
@@ -45,9 +52,6 @@ let control = null
 // that lands in the second between a dropped socket and its retry used to vanish with
 // no sign, which reads exactly like the button not working.
 const pendingCommands = []
-// Steering and painted-rate reports are resent continuously, so a held copy would only
-// replay a stale intent once the link came back.
-const TRANSIENT_COMMANDS = new Set(["cmd", "painted"])
 
 function connectControl() {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:"
@@ -74,7 +78,7 @@ function connectControl() {
 function send(payload) {
     if (control && control.readyState === WebSocket.OPEN) {
         control.send(JSON.stringify(payload))
-    } else if (!TRANSIENT_COMMANDS.has(payload.type)) {
+    } else {
         pendingCommands.push(payload)
     }
 }
@@ -84,11 +88,16 @@ function applyStatus(status) {
         return
     }
     const publish = status.publish
-    const transports = [publish.lcm && "lcm", publish.zenoh && "zenoh"].filter(Boolean).join(" + ")
+    const transports = ["zenoh", publish.lcm && "lcm"].filter(Boolean).join(" + ")
     const target = element("publish-target")
-    target.textContent = transports
-        ? `driving ${publish.topic} over ${transports}`
-        : "not publishing"
+    target.textContent = `driving ${publish.topic} over ${transports}`
+    if (zenoh.client?.state !== "connected") {
+        target.textContent += ` — zenoh-web ${zenoh.client?.state ?? "connecting"}`
+    }
+    if (drive.publisher?.state === "rejected") {
+        target.textContent += ` — ${drive.publisher.rejectionReason ?? "command topic refused"}`
+    }
+    state.zenohWeb = status.zenoh_web
 
     const lcmError = status.receivers?.lcm_error
     state.lcmError = lcmError
@@ -105,10 +114,14 @@ function applyStatus(status) {
     }
 
     state.settings = withPendingSettings(status.settings)
+    state.topicsByKey = new Map(status.topics.map((topic) => [topic.key, topic]))
     renderSettings(state.settings)
-    renderCameras(status.topics)
+    keepZenohConnected()
+    keepDriving()
+    refreshTileSubscriptions()
+    renderCameras()
     renderTopics(status.topics)
-    renderTileStats(status.streams, status.topics)
+    renderTileStats()
     renderRecording(status.recording, status.topics)
     renderLauncher(status.launcher)
     renderValues()
@@ -508,38 +521,99 @@ function renderValues() {
     element("value-angular").textContent = angular.toFixed(2)
 }
 
-function renderCameras(topics) {
-    const picker = element("camera-picker")
-    const images = topics.filter((topic) => topic.is_image)
-    const wanted = new Set(images.map((topic) => topic.topic))
+/// Cameras come from zenoh-web's topic listing, which sees every lcm channel web_ctrl
+/// relays (each holds a liveliness token) and any zenoh publisher that declares
+/// itself. A zenoh camera that only ever puts is invisible to a listing that does not
+/// subscribe, so the image topics web_ctrl's own catch-all heard are merged in.
+function renderCameras() {
+    const cameras = new Map()
+    for (const key of state.listedKeys ?? []) {
+        const msgType = imageTypeOf(key)
+        if (msgType) {
+            cameras.set(key, { key, msgType })
+        }
+    }
+    for (const topic of state.topicsByKey.values()) {
+        if (topic.is_image && !cameras.has(topic.key)) {
+            cameras.set(topic.key, { key: topic.key, msgType: topic.msg_type })
+        }
+    }
+    for (const camera of cameras.values()) {
+        const topic = state.topicsByKey.get(camera.key)
+        camera.label = topic?.topic ?? camera.key.replace(/^dimos\//, "").replace(/\/[^/]*$/, "")
+        camera.encoding = topic?.encoding ?? null
+        camera.rate = topic?.rate ?? 0
+    }
+    state.cameras = cameras
 
+    const picker = element("camera-picker")
     for (const chip of [...picker.children]) {
-        if (!wanted.has(chip.dataset.topic)) {
+        if (!cameras.has(chip.dataset.key)) {
             chip.remove()
         }
     }
-    for (const topic of images) {
-        let chip = picker.querySelector(`[data-topic="${CSS.escape(topic.topic)}"]`)
+    const sorted = [...cameras.values()].sort((left, right) => left.label.localeCompare(right.label))
+    for (const camera of sorted) {
+        let chip = picker.querySelector(`[data-key="${CSS.escape(camera.key)}"]`)
         if (!chip) {
             chip = document.createElement("button")
             chip.className = "chip"
-            chip.dataset.topic = topic.topic
-            chip.addEventListener("click", () => toggleStream(topic.topic))
+            chip.dataset.key = camera.key
+            chip.addEventListener("click", () => toggleStream(camera.key))
             // The rate lives in its own fixed-width span: written inline, every
             // 9→10 hz tick resized the chip and shoved its neighbours sideways.
             chip.append(
-                Object.assign(document.createElement("span"), { textContent: `${topic.topic} · ` }),
+                Object.assign(document.createElement("span"), { textContent: `${camera.label} · ` }),
                 Object.assign(document.createElement("span"), { className: "hz" }),
             )
             picker.append(chip)
         }
-        setText(chip.lastChild, `${topic.rate.toFixed(0)}hz`)
-        chip.classList.toggle("on", state.watching.has(topic.topic))
+        setText(chip.lastChild, `${camera.rate.toFixed(0)}hz`)
+        chip.classList.toggle("on", state.watching.has(camera.key))
     }
-    if (images.length && state.watching.size === 0) {
-        toggleStream(images[0].topic)
+    if (sorted.length && state.watching.size === 0 && !state.closedByHand) {
+        toggleStream(sorted[0].key)
     }
     element("streams-empty").hidden = state.watching.size > 0
+}
+
+const IMAGE_TYPES = ["sensor_msgs.Image", "sensor_msgs.CompressedImage"]
+
+const imageTypeOf = (key) => IMAGE_TYPES.find((msgType) => key.endsWith(`/${msgType}`)) ?? null
+
+/// Depth goes to a canvas, losslessly; anything else becomes H.264 video. The pixel
+/// encoding decides when web_ctrl has read a frame, the name when it has not (an
+/// unwatched fragmented lcm image is never reassembled, so its encoding is unknown).
+function codecFor(camera) {
+    const depthEncodings = ["16UC1", "32FC1", "mono16"]
+    const looksDepth = camera.encoding
+        ? depthEncodings.includes(camera.encoding) && (camera.encoding !== "mono16" || /depth/i.test(camera.key))
+        : /depth/i.test(camera.key)
+    if (camera.msgType === "sensor_msgs.CompressedImage") {
+        return looksDepth ? "dimos-compressed-depth" : "dimos-compressed-image"
+    }
+    return looksDepth ? "dimos-depth" : "dimos-image"
+}
+
+let discovering = false
+
+async function discoverCameras() {
+    const client = zenoh.client
+    if (discovering || !client || client.state !== "connected") {
+        return
+    }
+    discovering = true
+    try {
+        // probeMs 0: declarations and tokens only. A probe would subscribe to every
+        // key for a moment and wake each lazily relayed camera for nothing.
+        const listed = await client.listTopics("**", { probeMs: 0 })
+        state.listedKeys = listed.map((topic) => topic.key)
+        renderCameras()
+    } catch (error) {
+        console.warn("listing topics failed", error)
+    } finally {
+        discovering = false
+    }
 }
 
 function renderTopics(topics) {
@@ -567,10 +641,11 @@ function renderTopics(topics) {
     })
 }
 
-/// Mirrors the thresholds the encoder degrades quality at, so the colour changes at
-/// the same moment the picture does.
+/// Driving is comfortable under 150 ms and visibly laggy past 300.
 const LATENCY_GOOD_MS = 150
 const LATENCY_HIGH_MS = 300
+/// A frame older than this is not worth sending: the bridge drops it instead.
+const FRAME_MAX_AGE_MS = 500
 
 /// A frozen last frame reads exactly like a live one, so a feed that stopped is
 /// blanked rather than left showing whatever it was pointing at minutes ago. The
@@ -578,53 +653,50 @@ const LATENCY_HIGH_MS = 300
 /// blink offline between frames.
 const OFFLINE_FLOOR_MS = 3000
 
-function renderTileStats(streams, topics) {
-    const rates = new Map(topics.map((topic) => [topic.topic, topic.rate]))
-    for (const [topic, tile] of state.tiles) {
-        // Only this side knows how many frames actually made it onto the canvas: a
-        // phone whose jpeg decoder is the bottleneck receives everything and draws
-        // a fraction of it, which looks identical to a healthy stream from the robot.
+function renderTileStats() {
+    for (const tile of state.tiles.values()) {
+        // Only this side knows how many frames actually made it onto the screen: a
+        // phone whose decoder is the bottleneck receives everything and shows a
+        // fraction of it, which looks identical to a healthy stream from the robot.
         const since = performance.now() - tile.countedAt
         if (since >= 1000) {
             tile.paintedFps = tile.painted / (since / 1000)
-            send({ type: "painted", topic, fps: tile.paintedFps })
             tile.painted = 0
             tile.countedAt = performance.now()
         }
-        const stats = streams[topic]
-        const rate = rates.get(topic) ?? 0
+        const rate = state.cameras.get(tile.key)?.rate ?? 0
         const window = Math.max(OFFLINE_FLOOR_MS, rate > 0 ? 4000 / rate : 0)
         const offline = tile.paintedAt === 0 || performance.now() - tile.paintedAt > window
         tile.root.classList.toggle("offline", offline)
+        if (tile.refusal) {
+            setText(tile.info, tile.refusal)
+            continue
+        }
         if (offline) {
-            if (tile.canvas.width > 0) {
-                tile.context.clearRect(0, 0, tile.canvas.width, tile.canvas.height)
+            if (tile.media instanceof HTMLCanvasElement && tile.media.width > 0) {
+                tile.media.getContext("2d").clearRect(0, 0, tile.media.width, tile.media.height)
             }
             tile.latency.hidden = true
             setText(tile.info, tile.paintedAt === 0 ? "waiting for frames" : "offline")
             continue
         }
-        if (!stats) {
-            continue
+        // The first number is what this browser drew, not what the robot sent: a
+        // tile that says 29 fps while showing 5 is the bug this whole reading is for.
+        const frame = tile.lastFrame
+        let detail = ""
+        if (frame?.video) {
+            const video = frame.video
+            detail = ` · ${video.width}x${video.height} q${Math.round(video.quality * 100)} · ${(video.encodedBytes / 1024).toFixed(0)} KB`
+        } else if (frame?.depth) {
+            const depth = frame.depth
+            detail = ` · ${depth.width}x${depth.height} depth${depth.stride > 1 ? ` 1/${depth.stride}` : ""}`
         }
-        // Quality is ours to report only when we did the encoding; a passed-through
-        // frame carries whatever the publisher chose.
-        const size = stats.passthrough
-            ? `${stats.width}x${stats.height} as sent`
-            : `${stats.width}x${stats.height} q${stats.quality}`
-        const kilobytes = (stats.jpeg_bytes / 1024).toFixed(0)
-        // The first number is what this browser drew, not what the robot encoded:
-        // a tile that says 29 fps while showing 5 is the bug this whole reading is for.
-        setText(tile.info, stats.error
-            ? stats.error
-            : `${tile.paintedFps.toFixed(0)}/${stats.source_fps.toFixed(0)} fps · ${size} · ${kilobytes} KB`)
-        // Null means the publisher does not stamp its frames, which is not the same
-        // as zero latency, so the field is left blank rather than showing "0 ms".
-        const dropped = stats.late_dropped > 0 ? ` · ${stats.late_dropped} late` : ""
-        tile.latency.hidden = stats.latency_ms === null
-        setText(tile.latency, stats.latency_ms === null ? "" : `${stats.latency_ms.toFixed(0)} ms${dropped}`)
-        tile.latency.classList.toggle("bad", stats.latency_ms > LATENCY_HIGH_MS)
-        tile.latency.classList.toggle("warn", stats.latency_ms > LATENCY_GOOD_MS && stats.latency_ms <= LATENCY_HIGH_MS)
+        setText(tile.info, `${tile.paintedFps.toFixed(0)}/${rate.toFixed(0)} fps${detail}`)
+        const latency = tile.latencyMs
+        tile.latency.hidden = latency === null
+        setText(tile.latency, latency === null ? "" : `${latency.toFixed(0)} ms`)
+        tile.latency.classList.toggle("bad", latency > LATENCY_HIGH_MS)
+        tile.latency.classList.toggle("warn", latency > LATENCY_GOOD_MS && latency <= LATENCY_HIGH_MS)
     }
 }
 
@@ -837,97 +909,375 @@ async function pollTf() {
     }
 }
 
-function toggleStream(topic) {
-    if (state.watching.has(topic)) {
-        state.watching.delete(topic)
-        const tile = state.tiles.get(topic)
+function toggleStream(key) {
+    if (state.watching.has(key)) {
+        state.watching.delete(key)
+        // Closing every tile by hand must not have the first camera pop back open.
+        state.closedByHand = state.watching.size === 0
+        const tile = state.tiles.get(key)
         if (tile) {
-            state.tiles.delete(topic)
-            tile.socket?.close()
+            state.tiles.delete(key)
+            tile.subscription?.close()
             tile.root.remove()
         }
     } else {
-        state.watching.add(topic)
-        openStream(topic)
+        state.watching.add(key)
+        openTile(key)
     }
-    element("streams-empty").hidden = state.watching.size > 0
+    renderCameras()
 }
 
-function openStream(topic) {
+function openTile(key) {
+    const camera = state.cameras.get(key) ?? { key, label: key, msgType: imageTypeOf(key) }
+    const codec = codecFor(camera)
+    const isDepth = codec.endsWith("-depth")
     const root = document.createElement("div")
     root.className = "tile"
-    const canvas = document.createElement("canvas")
+    const media = isDepth
+        ? document.createElement("canvas")
+        : Object.assign(document.createElement("video"), { muted: true, autoplay: true, playsInline: true })
     const bar = document.createElement("div")
     bar.className = "tile-bar"
     const name = document.createElement("strong")
-    name.textContent = topic
+    name.textContent = camera.label
     const info = document.createElement("span")
     info.textContent = "connecting"
     const latency = document.createElement("span")
     bar.append(name, info, latency)
-    root.append(canvas, bar)
+    root.append(media, bar)
     element("streams").append(root)
 
-    const context = canvas.getContext("2d")
-    const tile = { root, canvas, context, info, latency, socket: null, paintedAt: 0, painted: 0, paintedFps: 0, countedAt: performance.now() }
-    state.tiles.set(topic, tile)
-    connectStream(topic, tile)
+    const tile = {
+        key, codec, root, media, info, latency,
+        subscription: null, optionsSignature: null, refusal: null,
+        paintedAt: 0, painted: 0, paintedFps: 0, countedAt: performance.now(),
+        lastFrame: null, latencyMs: null,
+    }
+    root.dataset.key = key
+    state.tiles.set(key, tile)
+    if (!isDepth) {
+        countVideoFrames(tile)
+    }
+    subscribeTile(tile)
 }
 
-/// The socket has to come back on its own: a phone that slept, a web_ctrl restart
-/// or a dropped wifi frame all close it, and until now that left the tile dead
-/// until someone reloaded the page.
-function connectStream(topic, tile) {
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:"
-    const socket = new WebSocket(`${protocol}//${location.host}/ws/stream/${topic}`)
-    socket.binaryType = "arraybuffer"
-    tile.socket = socket
-
-    // One slot, newest wins. Dropping whatever arrives during a decode painted the
-    // *oldest* frame of a burst and threw away everything newer, so a link that
-    // delivers in bursts — which wifi does — showed a picture several frames stale.
-    let pending = null
-    let decoding = false
-    const drain = async () => {
-        if (decoding) {
-            return
-        }
-        decoding = true
-        while (pending) {
-            const data = pending
-            pending = null
-            try {
-                const bitmap = await createImageBitmap(new Blob([data], { type: "image/jpeg" }))
-                if (tile.canvas.width !== bitmap.width || tile.canvas.height !== bitmap.height) {
-                    tile.canvas.width = bitmap.width
-                    tile.canvas.height = bitmap.height
-                }
-                tile.context.drawImage(bitmap, 0, 0)
-                bitmap.close()
-                tile.paintedAt = performance.now()
-                tile.painted += 1
-            } catch (error) {
-                tile.info.textContent = `decode failed: ${error}`
-            }
-        }
-        decoding = false
+/// requestVideoFrameCallback fires once per frame actually composited, which is the
+/// only honest frame rate for a <video>.
+function countVideoFrames(tile) {
+    const video = tile.media
+    if (!video.requestVideoFrameCallback) {
+        return
     }
-    socket.addEventListener("message", (event) => {
-        if (typeof event.data === "string") {
-            return
+    const onFrame = () => {
+        tile.painted += 1
+        tile.paintedAt = performance.now()
+        video.requestVideoFrameCallback(onFrame)
+    }
+    video.requestVideoFrameCallback(onFrame)
+}
+
+/// The camera settings, as zenoh-web subscribe options. Quality is the best a camera
+/// is sent at; with auto quality on, zenoh-web may lower it to a tenth to fit the
+/// link, and the tradeoff says whether it gives up sharpness or frames first.
+function subscribeOptions(codec) {
+    const settings = state.settings
+    const best = settings.quality / 100
+    const options = {
+        codec,
+        maxQuality: best,
+        minQuality: settings.auto_quality ? Math.min(0.1, best) : best,
+        qualityToHzTradeoff: settings.quality_to_hz_tradeoff,
+        maxAge: FRAME_MAX_AGE_MS,
+    }
+    if (settings.max_hz > 0) {
+        options.maxHz = settings.max_hz
+    }
+    return options
+}
+
+function subscribeTile(tile) {
+    tile.subscription?.close()
+    tile.subscription = null
+    const client = zenoh.client
+    if (!client || !state.settings) {
+        return
+    }
+    const options = subscribeOptions(tile.codec)
+    tile.optionsSignature = JSON.stringify(options)
+    tile.refusal = null
+    const subscription = client.subscribe(tile.key, options, (message) => onTileMessage(tile, message))
+    tile.subscription = subscription
+    subscription.ready().catch((error) => {
+        if (tile.subscription === subscription) {
+            tile.refusal = `refused: ${error.message}`
         }
-        pending = event.data
-        drain()
     })
-    socket.addEventListener("close", () => {
-        if (state.tiles.get(topic) === tile && state.watching.has(topic)) {
-            setTimeout(() => {
-                if (state.tiles.get(topic) === tile && state.watching.has(topic)) {
-                    connectStream(topic, tile)
-                }
-            }, 1000)
+}
+
+/// Options only change by closing and subscribing again, so this runs on every
+/// status and is a no-op unless a camera setting actually moved.
+function refreshTileSubscriptions() {
+    if (!state.settings) {
+        return
+    }
+    for (const tile of state.tiles.values()) {
+        if (!tile.subscription || JSON.stringify(subscribeOptions(tile.codec)) !== tile.optionsSignature) {
+            subscribeTile(tile)
         }
-    })
+    }
+}
+
+function onTileMessage(tile, message) {
+    tile.lastFrame = message
+    const client = zenoh.client
+    // The frame's stamp is on the bridge's clock, so shift it onto ours.
+    if (client && client.clockOffsetMs !== null) {
+        const age = client.now() + client.clockOffsetMs - message.timestamp
+        tile.latencyMs = age >= 0 && age < 10000 ? age : null
+    }
+    if (message.mediaStream && tile.media.srcObject !== message.mediaStream) {
+        tile.media.srcObject = message.mediaStream
+        tile.media.play().catch(() => {})
+    }
+    if (message.depth) {
+        drawDepth(tile, message.depth)
+        tile.painted += 1
+        tile.paintedAt = performance.now()
+    }
+}
+
+const TURBO_STOPS = [
+    [0.19, 0.07, 0.23],
+    [0.11, 0.53, 0.90],
+    [0.14, 0.87, 0.68],
+    [0.68, 0.98, 0.24],
+    [0.98, 0.68, 0.12],
+    [0.73, 0.09, 0.03],
+]
+
+const TURBO = (() => {
+    const table = new Uint8Array(256 * 3)
+    for (let index = 0; index < 256; index++) {
+        const position = (index / 255) * (TURBO_STOPS.length - 1)
+        const low = Math.floor(position)
+        const high = Math.min(low + 1, TURBO_STOPS.length - 1)
+        const blend = position - low
+        for (let channel = 0; channel < 3; channel++) {
+            const value = TURBO_STOPS[low][channel] * (1 - blend) + TURBO_STOPS[high][channel] * blend
+            table[index * 3 + channel] = Math.round(value * 255)
+        }
+    }
+    return table
+})()
+
+/// Near is blue, far is red, stretched over this frame's own range; a missing
+/// reading (0, or not finite) stays black.
+function drawDepth(tile, depth) {
+    const { width, height, data } = depth
+    const canvas = tile.media
+    if (canvas.width !== width || canvas.height !== height) {
+        canvas.width = width
+        canvas.height = height
+    }
+    let low = Infinity
+    let high = -Infinity
+    for (const value of data) {
+        if (value > 0 && Number.isFinite(value)) {
+            low = Math.min(low, value)
+            high = Math.max(high, value)
+        }
+    }
+    const span = high > low ? high - low : 1
+    const context = canvas.getContext("2d")
+    const pixels = context.createImageData(width, height)
+    for (let index = 0; index < data.length; index++) {
+        const value = data[index]
+        const target = index * 4
+        pixels.data[target + 3] = 255
+        if (!(value > 0) || !Number.isFinite(value)) {
+            continue
+        }
+        const shade = Math.round(((value - low) / span) * 255) * 3
+        pixels.data[target] = TURBO[shade]
+        pixels.data[target + 1] = TURBO[shade + 1]
+        pixels.data[target + 2] = TURBO[shade + 2]
+    }
+    context.putImageData(pixels, 0, 0)
+}
+
+/// One connection to zenoh-web for the whole page: cameras, discovery and steering.
+/// It is signalled through web_ctrl's own origin, so the page never needs the
+/// bridge's address (see zenoh_web_link.rs).
+const zenoh = { client: null, connecting: false, heartbeatMisses: 0, wantedMisses: 0, wantedSince: 0 }
+
+/// Ten beats a second; the bridge fires the deadman after `deadman_ms` of silence.
+const HEARTBEAT_HZ = 10
+const missesFor = (deadmanMs) => Math.max(2, Math.round((deadmanMs / 1000) * HEARTBEAT_HZ))
+/// A dragged deadman slider must not reconnect on every step.
+const RECONNECT_SETTLE_MS = 1500
+
+function keepZenohConnected() {
+    const wanted = missesFor(state.settings.deadman_ms)
+    if (wanted !== zenoh.wantedMisses) {
+        zenoh.wantedMisses = wanted
+        zenoh.wantedSince = performance.now()
+    }
+    const stale = zenoh.client && zenoh.heartbeatMisses !== wanted
+        && performance.now() - zenoh.wantedSince > RECONNECT_SETTLE_MS
+    if ((zenoh.client && !stale) || zenoh.connecting) {
+        return
+    }
+    connectZenoh(wanted)
+}
+
+async function connectZenoh(heartbeatMisses) {
+    zenoh.connecting = true
+    const previous = zenoh.client
+    zenoh.client = null
+    try {
+        stopDriving()
+        previous?.close()
+        const client = await connect(`${location.origin}/zenoh-web`, { heartbeatHz: HEARTBEAT_HZ, heartbeatMisses })
+        zenoh.client = client
+        zenoh.heartbeatMisses = heartbeatMisses
+        for (const tile of state.tiles.values()) {
+            subscribeTile(tile)
+        }
+        discoverCameras()
+    } catch (error) {
+        console.warn("zenoh-web connection failed, retrying", error)
+        await new Promise((resolve) => setTimeout(resolve, 2000))
+    } finally {
+        zenoh.connecting = false
+    }
+}
+
+const TWIST_TYPE = "geometry_msgs.Twist"
+const TWIST_FINGERPRINT = [0x2e, 0x7c, 0x07, 0xd7, 0xcd, 0xf7, 0xe0, 0x27]
+
+/// The bytes dimos's own `Twist.lcm_encode` produces: the type's fingerprint, then
+/// linear and angular xyz as big-endian doubles.
+function encodeTwist(linear, angular) {
+    const bytes = new Uint8Array(56)
+    bytes.set(TWIST_FINGERPRINT)
+    const view = new DataView(bytes.buffer)
+    for (const [index, value] of [...linear, ...angular].entries()) {
+        view.setFloat64(8 + index * 8, value, false)
+    }
+    return bytes
+}
+
+const ZERO_TWIST = encodeTwist([0, 0, 0], [0, 0, 0])
+
+/// The key dimos's zenoh transport uses for a channel: `dimos/<name>/<msg_name>`.
+const dimosKey = (topic, msgType) => `dimos/${topic.replace(/^\/+/, "")}/${msgType}`
+
+const clampUnit = (value) => Math.max(-1, Math.min(1, value))
+
+/// The browser's stick and keys, in screen space, as a REP-103 twist: +y is left and
+/// +yaw counter-clockwise, so screen-right strafes and turns negative, matching
+/// dimos's own keyboard teleop.
+function currentTwist(settings) {
+    const turnSign = settings.invert_turn ? 1 : -1
+    return {
+        linear: [clampUnit(state.axes.forward) * settings.linear_speed, -clampUnit(state.axes.strafe) * settings.linear_speed, 0],
+        angular: [0, 0, clampUnit(state.axes.turn) * settings.angular_speed * turnSign],
+    }
+}
+
+/// Steering goes straight from this page onto zenoh, through zenoh-web; web_ctrl
+/// mirrors it onto lcm. Nothing is published while nobody steers: a held control
+/// publishes at `publish_hz`, a release is followed by a second of zeros so the stop
+/// is heard, then the topic goes quiet so a parked browser cannot drown out other
+/// teleop sources. While steering the bridge holds a zero twist as a deadman and
+/// publishes it if this page goes silent for `deadman_ms`, or disconnects.
+const drive = { publisher: null, client: null, key: null, armed: false, stopFlush: 0, timer: null, hz: 0 }
+
+function keepDriving() {
+    const hz = state.settings.publish_hz
+    if (drive.hz === hz && drive.timer) {
+        return
+    }
+    clearInterval(drive.timer)
+    drive.hz = hz
+    drive.timer = setInterval(driveTick, 1000 / hz)
+}
+
+function commandPublisher() {
+    const client = zenoh.client
+    if (!client || client.state === "lost") {
+        return null
+    }
+    const key = dimosKey(state.settings.publish_topic, TWIST_TYPE)
+    const current = drive.publisher
+    const usable = current && !["tripped", "closed"].includes(current.state)
+    if (usable && drive.key === key && drive.client === client) {
+        return current
+    }
+    if (usable && drive.client === client) {
+        // The topic was renamed mid-drive: the old one gets its stop first.
+        if (drive.armed) {
+            current.put(ZERO_TWIST)
+        }
+        current.close()
+    }
+    drive.publisher = client.publisher(key, { priority: Priority.REAL_TIME, latencyLimit: state.settings.deadman_ms })
+    drive.client = client
+    drive.key = key
+    drive.armed = false
+    return drive.publisher
+}
+
+function driveTick() {
+    const settings = state.settings
+    if (!settings) {
+        return
+    }
+    const twist = currentTwist(settings)
+    const moving = [...twist.linear, ...twist.angular].some((value) => value !== 0)
+    if (moving) {
+        drive.stopFlush = Math.round(settings.publish_hz)
+    } else if (drive.stopFlush > 0) {
+        drive.stopFlush -= 1
+    } else {
+        if (drive.armed) {
+            disarmDeadman()
+        }
+        return
+    }
+    const publisher = commandPublisher()
+    if (!publisher || publisher.state === "rejected") {
+        return
+    }
+    try {
+        if (moving && !drive.armed) {
+            drive.armed = true
+            publisher.setDeadman(ZERO_TWIST).catch((error) => {
+                drive.armed = false
+                console.warn("could not arm the deadman", error)
+            })
+        }
+        publisher.put(encodeTwist(twist.linear, twist.angular))
+    } catch (error) {
+        // Tripped since the last tick; the next one makes a fresh publisher.
+        drive.armed = false
+    }
+}
+
+function disarmDeadman() {
+    drive.armed = false
+    const publisher = drive.publisher
+    if (publisher && publisher.state === "open") {
+        publisher.clearDeadman().catch(() => {})
+    }
+}
+
+/// Before the connection it lives on is replaced. A deadman armed on the old one
+/// fires as that connection closes, which is the stop we want anyway.
+function stopDriving() {
+    drive.publisher?.close()
+    drive.publisher = null
+    drive.armed = false
 }
 
 function updateAxesFromKeys() {
@@ -1049,12 +1399,23 @@ function setupPad() {
     })
 }
 
+const describeTradeoff = (value) => {
+    if (value <= 0.3) {
+        return "keep it sharp"
+    }
+    if (value >= 0.7) {
+        return "keep it smooth"
+    }
+    return "balanced"
+}
+
 const SETTING_INPUTS = {
     "linear-speed": ["linear_speed", (value) => `${(+value).toFixed(2)} m/s`],
     "angular-speed": ["angular_speed", (value) => `${(+value).toFixed(1)} rad/s`],
     "deadman-ms": ["deadman_ms", (value) => `${(+value).toFixed(0)} ms`],
-    quality: ["quality", (value) => `${value}`],
-    "max-width": ["max_width", (value) => `${value} px`],
+    quality: ["quality", (value) => `${value}%`],
+    "max-hz": ["max_hz", (value) => (+value === 0 ? "unlimited" : `${value} Hz`)],
+    tradeoff: ["quality_to_hz_tradeoff", describeTradeoff],
 }
 
 const SETTING_TOGGLES = {
@@ -1080,7 +1441,6 @@ function renderSettings(settings) {
     for (const [id, key] of Object.entries(SETTING_TOGGLES)) {
         element(id).checked = settings[key]
     }
-    element("quality").disabled = settings.auto_quality
 
     // The writer is built when recording starts, so a mid-run change would
     // silently not apply.
@@ -1226,17 +1586,6 @@ function setupSettings() {
     saveButton.addEventListener("click", saveCommand)
 }
 
-function startCommandLoop() {
-    setInterval(() => {
-        send({
-            type: "cmd",
-            forward: state.axes.forward,
-            strafe: state.axes.strafe,
-            turn: state.axes.turn,
-        })
-    }, 50)
-}
-
 // A hidden tab keeps a stale command alive on some phones; drop the stick instead.
 document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
@@ -1251,6 +1600,6 @@ setupPad()
 setupButtons()
 setupSettings()
 connectControl()
-startCommandLoop()
 pollTf()
 setInterval(pollTf, 2000)
+setInterval(discoverCameras, 2000)
