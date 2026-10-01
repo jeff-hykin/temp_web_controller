@@ -649,8 +649,10 @@ const FRAME_MAX_AGE_MS = 500
 
 /// How camera pictures reach the page: "video" (zenoh-web's H.264 track, shown in a <video>)
 /// or "jpeg" (one JPEG file per picture on the data channel, drawn on a canvas). `?imageTransport=`
-/// in the page's URL overrides the default.
-const DEFAULT_IMAGE_TRANSPORT = "jpeg"
+/// in the page's URL overrides the default. On R1 (a Jetson Orin, Chrome over a jittery Wi-Fi +
+/// VPN path) H.264 measured ~27 fps against ~5 fps for JPEG files, whose data channel could not
+/// hold the rate on that path, so video is the default.
+const DEFAULT_IMAGE_TRANSPORT = "video"
 const IMAGE_TRANSPORT = ["video", "jpeg"].includes(new URLSearchParams(location.search).get("imageTransport"))
     ? new URLSearchParams(location.search).get("imageTransport")
     : DEFAULT_IMAGE_TRANSPORT
