@@ -16,8 +16,8 @@
 // Everything is isolated: zenoh never scouts, lcm uses its own multicast port, and
 // the only command topic is /tele_cmd_vel_test.
 //
-// Needs a zenoh-web binary for the second run: $ZENOH_WEB_BIN, else one built from
-// the rev Cargo.toml pins into target/test-tools (first run takes a few minutes).
+// Needs a zenoh-web binary for the second run: $ZENOH_WEB_BIN, else zenoh-web-cli built
+// at ZENOH_WEB_CLI_REV into target/test-tools (first run takes a few minutes).
 
 import { $ } from "https://esm.sh/dax-sh@0.42.0"
 import { launch } from "jsr:@astral/astral@0.5.6"
@@ -133,17 +133,20 @@ async function until(condition, timeoutMs, intervalMs = 200) {
     return await condition()
 }
 
+/** zenoh-web-cli at a commit that pins the same zenoh-web and zenoh-dimos-codecs as Cargo.toml */
+const ZENOH_WEB_CLI_REV = "0fe2c1f9aad60b25534887204ffa9dde38506c86"
+
 async function zenohWebBinary() {
     const fromEnvironment = Deno.env.get("ZENOH_WEB_BIN")
     if (fromEnvironment) {
         return fromEnvironment
     }
-    const rev = repoRoot.join("Cargo.toml").readTextSync().match(/zenoh-web = \{[^}]*rev = "([0-9a-f]+)"/)[1]
-    const root = repoRoot.join(`target/test-tools/zenoh-web-${rev.slice(0, 12)}`)
+    const rev = ZENOH_WEB_CLI_REV
+    const root = repoRoot.join(`target/test-tools/zenoh-web-cli-${rev.slice(0, 12)}`)
     const binary = root.join("bin/zenoh-web")
     if (!binary.existsSync()) {
-        $.logStep(`building zenoh-web ${rev.slice(0, 7)} for the already-running case`)
-        await $`cargo install --quiet --locked --git https://github.com/jeff-hykin/zenoh-web --rev ${rev} --root ${root} zenoh-web`
+        $.logStep(`building the zenoh-web command (zenoh-web-cli ${rev.slice(0, 7)}) for the already-running case`)
+        await $`cargo install --quiet --locked --git https://github.com/jeff-hykin/zenoh-web-cli --rev ${rev} --root ${root} zenoh-web-cli`
     }
     return binary.toString()
 }

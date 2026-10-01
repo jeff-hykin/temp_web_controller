@@ -698,8 +698,8 @@ function renderTileStats() {
             detail = ` · ${video.width}x${video.height} q${Math.round(video.quality * 100)} · ${(video.encodedBytes / 1024).toFixed(0)} KB`
         } else if (tile.imageSize) {
             detail = ` · ${tile.imageSize} jpeg · ${(tile.imageBytes / 1024).toFixed(0)} KB`
-        } else if (frame?.depth) {
-            const depth = frame.depth
+        } else if (frame?.decoded) {
+            const depth = frame.decoded
             detail = ` · ${depth.width}x${depth.height} depth${depth.stride > 1 ? ` 1/${depth.stride}` : ""}`
         }
         setText(tile.info, `${tile.paintedFps.toFixed(0)}/${rate.toFixed(0)} fps${detail}`)
@@ -1060,8 +1060,8 @@ function onTileMessage(tile, message) {
         tile.painted += 1
         tile.paintedAt = performance.now()
     }
-    if (message.depth) {
-        drawDepth(tile, message.depth)
+    if (message.decoded) {
+        drawDepth(tile, message.decoded)
         tile.painted += 1
         tile.paintedAt = performance.now()
     }

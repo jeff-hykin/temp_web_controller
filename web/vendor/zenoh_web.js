@@ -1,579 +1,4 @@
-// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@799d8f4a8412505bf195b521c8e865d35e120845 by run/vendor_zenoh_web. Do not edit.
-// zenoh-web/client/vendor/fzstd.ts
-var ab = ArrayBuffer;
-var u8 = Uint8Array;
-var u16 = Uint16Array;
-var i16 = Int16Array;
-var i32 = Int32Array;
-var slc = (v, s, e) => {
-  if (u8.prototype.slice) return u8.prototype.slice.call(v, s, e);
-  if (s == null || s < 0) s = 0;
-  if (e == null || e > v.length) e = v.length;
-  const n = new u8(e - s);
-  n.set(v.subarray(s, e));
-  return n;
-};
-var fill = (v, n, s, e) => {
-  if (u8.prototype.fill) return u8.prototype.fill.call(v, n, s, e);
-  if (s == null || s < 0) s = 0;
-  if (e == null || e > v.length) e = v.length;
-  for (; s < e; ++s) v[s] = n;
-  return v;
-};
-var cpw = (v, t, s, e) => {
-  if (u8.prototype.copyWithin) return u8.prototype.copyWithin.call(v, t, s, e);
-  if (s == null || s < 0) s = 0;
-  if (e == null || e > v.length) e = v.length;
-  while (s < e) {
-    v[t++] = v[s++];
-  }
-};
-var ec = [
-  "invalid zstd data",
-  "window size too large (>2046MB)",
-  "invalid block type",
-  "FSE accuracy too high",
-  "match distance too far back",
-  "unexpected EOF"
-];
-var err = (ind, msg, nt) => {
-  const e = new Error(msg || ec[ind]);
-  e.code = ind;
-  if (Error.captureStackTrace) Error.captureStackTrace(e, err);
-  if (!nt) throw e;
-  return e;
-};
-var rb = (d, b, n) => {
-  let i = 0, o = 0;
-  for (; i < n; ++i) o |= d[b++] << (i << 3);
-  return o;
-};
-var b4 = (d, b) => (d[b] | d[b + 1] << 8 | d[b + 2] << 16 | d[b + 3] << 24) >>> 0;
-var rzfh = (dat, w) => {
-  const n3 = dat[0] | dat[1] << 8 | dat[2] << 16;
-  if (n3 == 3126568 && dat[3] == 253) {
-    const flg = dat[4];
-    const ss = flg >> 5 & 1, cc = flg >> 2 & 1, df = flg & 3, fcf = flg >> 6;
-    if (flg & 8) err(0);
-    let bt = 6 - ss;
-    const db = df == 3 ? 4 : df;
-    const di = rb(dat, bt, db);
-    bt += db;
-    const fsb = fcf ? 1 << fcf : ss;
-    const fss = rb(dat, bt, fsb) + (fcf == 1 && 256);
-    let ws = fss;
-    if (!ss) {
-      const wb = 1 << 10 + (dat[5] >> 3);
-      ws = wb + (wb >> 3) * (dat[5] & 7);
-    }
-    if (ws > 2145386496) err(1);
-    const buf = new u8((w == 1 ? fss || ws : w ? 0 : ws) + 12);
-    buf[0] = 1, buf[4] = 4, buf[8] = 8;
-    return {
-      b: bt + fsb,
-      y: 0,
-      l: 0,
-      d: di,
-      w: w && w != 1 ? w : buf.subarray(12),
-      e: ws,
-      o: new i32(buf.buffer, 0, 3),
-      u: fss,
-      c: cc,
-      m: Math.min(131072, ws)
-    };
-  } else if ((n3 >> 4 | dat[3] << 20) == 25481893) {
-    return b4(dat, 4) + 8;
-  }
-  err(0);
-};
-var msb = (val) => {
-  let bits = 0;
-  for (; 1 << bits <= val; ++bits) ;
-  return bits - 1;
-};
-var rfse = (dat, bt, mal) => {
-  let tpos = (bt << 3) + 4;
-  const al = (dat[bt] & 15) + 5;
-  if (al > mal) err(3);
-  const sz = 1 << al;
-  let probs = sz, sym = -1, re = -1, i = -1, ht = sz;
-  const buf = new ab(512 + (sz << 2));
-  const freq = new i16(buf, 0, 256);
-  const dstate = new u16(buf, 0, 256);
-  const nstate = new u16(buf, 512, sz);
-  const bb1 = 512 + (sz << 1);
-  const syms = new u8(buf, bb1, sz);
-  const nbits = new u8(buf, bb1 + sz);
-  while (sym < 255 && probs > 0) {
-    const bits = msb(probs + 1);
-    const cbt = tpos >> 3;
-    const msk = (1 << bits + 1) - 1;
-    let val = (dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (tpos & 7) & msk;
-    const msk1fb = (1 << bits) - 1;
-    const msv = msk - probs - 1;
-    const sval = val & msk1fb;
-    if (sval < msv) tpos += bits, val = sval;
-    else {
-      tpos += bits + 1;
-      if (val > msk1fb) val -= msv;
-    }
-    freq[++sym] = --val;
-    if (val == -1) {
-      probs += val;
-      syms[--ht] = sym;
-    } else probs -= val;
-    if (!val) {
-      do {
-        const rbt = tpos >> 3;
-        re = (dat[rbt] | dat[rbt + 1] << 8) >> (tpos & 7) & 3;
-        tpos += 2;
-        sym += re;
-      } while (re == 3);
-    }
-  }
-  if (sym > 255 || probs) err(0);
-  let sympos = 0;
-  const sstep = (sz >> 1) + (sz >> 3) + 3;
-  const smask = sz - 1;
-  for (let s = 0; s <= sym; ++s) {
-    const sf = freq[s];
-    if (sf < 1) {
-      dstate[s] = -sf;
-      continue;
-    }
-    for (i = 0; i < sf; ++i) {
-      syms[sympos] = s;
-      do {
-        sympos = sympos + sstep & smask;
-      } while (sympos >= ht);
-    }
-  }
-  if (sympos) err(0);
-  for (i = 0; i < sz; ++i) {
-    const ns = dstate[syms[i]]++;
-    const nb = nbits[i] = al - msb(ns);
-    nstate[i] = (ns << nb) - sz;
-  }
-  return [
-    tpos + 7 >> 3,
-    {
-      b: al,
-      s: syms,
-      n: nbits,
-      t: nstate
-    }
-  ];
-};
-var rhu = (dat, bt) => {
-  let i = 0, wc = -1;
-  const buf = new u8(292), hb = dat[bt];
-  const hw = buf.subarray(0, 256);
-  const rc = buf.subarray(256, 268);
-  const ri = new u16(buf.buffer, 268);
-  if (hb < 128) {
-    const [ebt, fdt] = rfse(dat, bt + 1, 6);
-    bt += hb;
-    const epos = ebt << 3;
-    const lb = dat[bt];
-    if (!lb) err(0);
-    let st1 = 0, st2 = 0, btr1 = fdt.b, btr2 = btr1;
-    let fpos = (++bt << 3) - 8 + msb(lb);
-    for (; ; ) {
-      fpos -= btr1;
-      if (fpos < epos) break;
-      let cbt = fpos >> 3;
-      st1 += (dat[cbt] | dat[cbt + 1] << 8) >> (fpos & 7) & (1 << btr1) - 1;
-      hw[++wc] = fdt.s[st1];
-      fpos -= btr2;
-      if (fpos < epos) break;
-      cbt = fpos >> 3;
-      st2 += (dat[cbt] | dat[cbt + 1] << 8) >> (fpos & 7) & (1 << btr2) - 1;
-      hw[++wc] = fdt.s[st2];
-      btr1 = fdt.n[st1];
-      st1 = fdt.t[st1];
-      btr2 = fdt.n[st2];
-      st2 = fdt.t[st2];
-    }
-    if (++wc > 255) err(0);
-  } else {
-    wc = hb - 127;
-    for (; i < wc; i += 2) {
-      const byte = dat[++bt];
-      hw[i] = byte >> 4;
-      hw[i + 1] = byte & 15;
-    }
-    ++bt;
-  }
-  let wes = 0;
-  for (i = 0; i < wc; ++i) {
-    const wt = hw[i];
-    if (wt > 11) err(0);
-    wes += wt && 1 << wt - 1;
-  }
-  const mb = msb(wes) + 1;
-  const ts = 1 << mb;
-  const rem = ts - wes;
-  if (rem & rem - 1) err(0);
-  hw[wc++] = msb(rem) + 1;
-  for (i = 0; i < wc; ++i) {
-    const wt = hw[i];
-    ++rc[hw[i] = wt && mb + 1 - wt];
-  }
-  const hbuf = new u8(ts << 1);
-  const syms = hbuf.subarray(0, ts), nb = hbuf.subarray(ts);
-  ri[mb] = 0;
-  for (i = mb; i > 0; --i) {
-    const pv = ri[i];
-    fill(nb, i, pv, ri[i - 1] = pv + rc[i] * (1 << mb - i));
-  }
-  if (ri[0] != ts) err(0);
-  for (i = 0; i < wc; ++i) {
-    const bits = hw[i];
-    if (bits) {
-      const code = ri[bits];
-      fill(syms, i, code, ri[bits] = code + (1 << mb - bits));
-    }
-  }
-  return [
-    bt,
-    {
-      n: nb,
-      b: mb,
-      s: syms
-    }
-  ];
-};
-var dllt = rfse(/* @__PURE__ */ new u8([
-  81,
-  16,
-  99,
-  140,
-  49,
-  198,
-  24,
-  99,
-  12,
-  33,
-  196,
-  24,
-  99,
-  102,
-  102,
-  134,
-  70,
-  146,
-  4
-]), 0, 6)[1];
-var dmlt = rfse(/* @__PURE__ */ new u8([
-  33,
-  20,
-  196,
-  24,
-  99,
-  140,
-  33,
-  132,
-  16,
-  66,
-  8,
-  33,
-  132,
-  16,
-  66,
-  8,
-  33,
-  68,
-  68,
-  68,
-  68,
-  68,
-  68,
-  68,
-  68,
-  36,
-  9
-]), 0, 6)[1];
-var doct = rfse(/* @__PURE__ */ new u8([
-  32,
-  132,
-  16,
-  66,
-  102,
-  70,
-  68,
-  68,
-  68,
-  68,
-  36,
-  73,
-  2
-]), 0, 5)[1];
-var b2bl = (b, s) => {
-  const len = b.length, bl = new i32(len);
-  for (let i = 0; i < len; ++i) {
-    bl[i] = s;
-    s += 1 << b[i];
-  }
-  return bl;
-};
-var llb = /* @__PURE__ */ new u8(new i32([
-  0,
-  0,
-  0,
-  0,
-  16843009,
-  50528770,
-  134678020,
-  202050057,
-  269422093
-]).buffer, 0, 36);
-var llbl = /* @__PURE__ */ b2bl(llb, 0);
-var mlb = /* @__PURE__ */ new u8(new i32([
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  0,
-  16843009,
-  50528770,
-  117769220,
-  185207048,
-  252579084,
-  16
-]).buffer, 0, 53);
-var mlbl = /* @__PURE__ */ b2bl(mlb, 3);
-var dhu = (dat, out, hu) => {
-  const len = dat.length, ss = out.length, lb = dat[len - 1], msk = (1 << hu.b) - 1, eb = -hu.b;
-  if (!lb) err(0);
-  let st = 0, btr = hu.b, pos = (len << 3) - 8 + msb(lb) - btr, i = -1;
-  for (; pos > eb && i < ss; ) {
-    const cbt = pos >> 3;
-    const val = (dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (pos & 7);
-    st = (st << btr | val) & msk;
-    out[++i] = hu.s[st];
-    pos -= btr = hu.n[st];
-  }
-  if (pos != eb || i + 1 != ss) err(0);
-};
-var dhu4 = (dat, out, hu) => {
-  let bt = 6;
-  const ss = out.length, sz1 = ss + 3 >> 2, sz2 = sz1 << 1, sz3 = sz1 + sz2;
-  dhu(dat.subarray(bt, bt += dat[0] | dat[1] << 8), out.subarray(0, sz1), hu);
-  dhu(dat.subarray(bt, bt += dat[2] | dat[3] << 8), out.subarray(sz1, sz2), hu);
-  dhu(dat.subarray(bt, bt += dat[4] | dat[5] << 8), out.subarray(sz2, sz3), hu);
-  dhu(dat.subarray(bt), out.subarray(sz3), hu);
-};
-var rzb = (dat, st, out) => {
-  let bt = st.b;
-  const b0 = dat[bt], btype = b0 >> 1 & 3;
-  st.l = b0 & 1;
-  const sz = b0 >> 3 | dat[bt + 1] << 5 | dat[bt + 2] << 13;
-  const ebt = (bt += 3) + sz;
-  if (btype == 1) {
-    if (bt >= dat.length) return;
-    st.b = bt + 1;
-    if (out) {
-      fill(out, dat[bt], st.y, st.y += sz);
-      return out;
-    }
-    return fill(new u8(sz), dat[bt]);
-  }
-  if (ebt > dat.length) return;
-  if (btype == 0) {
-    st.b = ebt;
-    if (out) {
-      out.set(dat.subarray(bt, ebt), st.y);
-      st.y += sz;
-      return out;
-    }
-    return slc(dat, bt, ebt);
-  }
-  if (btype == 2) {
-    const b3 = dat[bt], lbt = b3 & 3, sf = b3 >> 2 & 3;
-    let lss = b3 >> 4, lcs = 0, s4 = 0;
-    if (lbt < 2) {
-      if (sf & 1) lss |= dat[++bt] << 4 | (sf & 2 && dat[++bt] << 12);
-      else lss = b3 >> 3;
-    } else {
-      s4 = sf;
-      if (sf < 2) lss |= (dat[++bt] & 63) << 4, lcs = dat[bt] >> 6 | dat[++bt] << 2;
-      else if (sf == 2) lss |= dat[++bt] << 4 | (dat[++bt] & 3) << 12, lcs = dat[bt] >> 2 | dat[++bt] << 6;
-      else lss |= dat[++bt] << 4 | (dat[++bt] & 63) << 12, lcs = dat[bt] >> 6 | dat[++bt] << 2 | dat[++bt] << 10;
-    }
-    ++bt;
-    let buf = out ? out.subarray(st.y, st.y + st.m) : new u8(st.m);
-    let spl = buf.length - lss;
-    if (lbt == 0) buf.set(dat.subarray(bt, bt += lss), spl);
-    else if (lbt == 1) fill(buf, dat[bt++], spl);
-    else {
-      let hu = st.h;
-      if (lbt == 2) {
-        const hud = rhu(dat, bt);
-        lcs += bt - (bt = hud[0]);
-        st.h = hu = hud[1];
-      } else if (!hu) err(0);
-      (s4 ? dhu4 : dhu)(dat.subarray(bt, bt += lcs), buf.subarray(spl), hu);
-    }
-    let ns = dat[bt++];
-    if (ns) {
-      if (ns == 255) ns = (dat[bt++] | dat[bt++] << 8) + 32512;
-      else if (ns > 127) ns = ns - 128 << 8 | dat[bt++];
-      const scm = dat[bt++];
-      if (scm & 3) err(0);
-      const dts = [
-        dmlt,
-        doct,
-        dllt
-      ];
-      for (let i = 2; i > -1; --i) {
-        const md = scm >> (i << 1) + 2 & 3;
-        if (md == 1) {
-          const rbuf = new u8([
-            0,
-            0,
-            dat[bt++]
-          ]);
-          dts[i] = {
-            s: rbuf.subarray(2, 3),
-            n: rbuf.subarray(0, 1),
-            t: new u16(rbuf.buffer, 0, 1),
-            b: 0
-          };
-        } else if (md == 2) {
-          [bt, dts[i]] = rfse(dat, bt, 9 - (i & 1));
-        } else if (md == 3) {
-          if (!st.t) err(0);
-          dts[i] = st.t[i];
-        }
-      }
-      const [mlt, oct, llt] = st.t = dts;
-      const lb = dat[ebt - 1];
-      if (!lb) err(0);
-      let spos = (ebt << 3) - 8 + msb(lb) - llt.b, cbt = spos >> 3, oubt = 0;
-      let lst = (dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << llt.b) - 1;
-      cbt = (spos -= oct.b) >> 3;
-      let ost = (dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << oct.b) - 1;
-      cbt = (spos -= mlt.b) >> 3;
-      let mst = (dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << mlt.b) - 1;
-      for (++ns; --ns; ) {
-        const llc = llt.s[lst];
-        const lbtr = llt.n[lst];
-        const mlc = mlt.s[mst];
-        const mbtr = mlt.n[mst];
-        const ofc = oct.s[ost];
-        const obtr = oct.n[ost];
-        cbt = (spos -= ofc) >> 3;
-        const ofp = 1 << ofc;
-        let off = ofp + ((dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16 | dat[cbt + 3] << 24) >>> (spos & 7) & ofp - 1);
-        cbt = (spos -= mlb[mlc]) >> 3;
-        let ml = mlbl[mlc] + ((dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (spos & 7) & (1 << mlb[mlc]) - 1);
-        cbt = (spos -= llb[llc]) >> 3;
-        const ll = llbl[llc] + ((dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (spos & 7) & (1 << llb[llc]) - 1);
-        cbt = (spos -= lbtr) >> 3;
-        lst = llt.t[lst] + ((dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << lbtr) - 1);
-        cbt = (spos -= mbtr) >> 3;
-        mst = mlt.t[mst] + ((dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << mbtr) - 1);
-        cbt = (spos -= obtr) >> 3;
-        ost = oct.t[ost] + ((dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << obtr) - 1);
-        if (off > 3) {
-          st.o[2] = st.o[1];
-          st.o[1] = st.o[0];
-          st.o[0] = off -= 3;
-        } else {
-          const idx = off - (ll != 0);
-          if (idx) {
-            off = idx == 3 ? st.o[0] - 1 : st.o[idx];
-            if (idx > 1) st.o[2] = st.o[1];
-            st.o[1] = st.o[0];
-            st.o[0] = off;
-          } else off = st.o[0];
-        }
-        for (let i = 0; i < ll; ++i) {
-          buf[oubt + i] = buf[spl + i];
-        }
-        oubt += ll, spl += ll;
-        let stin = oubt - off;
-        if (stin < 0) {
-          let len = -stin;
-          const bs = st.e + stin;
-          if (len > ml) len = ml;
-          for (let i = 0; i < len; ++i) {
-            buf[oubt + i] = st.w[bs + i];
-          }
-          oubt += len, ml -= len, stin = 0;
-        }
-        for (let i = 0; i < ml; ++i) {
-          buf[oubt + i] = buf[stin + i];
-        }
-        oubt += ml;
-      }
-      if (oubt != spl) {
-        while (spl < buf.length) {
-          buf[oubt++] = buf[spl++];
-        }
-      } else oubt = buf.length;
-      if (out) st.y += oubt;
-      else buf = slc(buf, 0, oubt);
-    } else if (out) {
-      st.y += lss;
-      if (spl) {
-        for (let i = 0; i < lss; ++i) {
-          buf[i] = buf[spl + i];
-        }
-      }
-    } else if (spl) buf = slc(buf, spl);
-    st.b = ebt;
-    return buf;
-  }
-  err(2);
-};
-var cct = (bufs, ol) => {
-  if (bufs.length == 1) return bufs[0];
-  const buf = new u8(ol);
-  for (let i = 0, b = 0; i < bufs.length; ++i) {
-    const chk = bufs[i];
-    buf.set(chk, b);
-    b += chk.length;
-  }
-  return buf;
-};
-function decompress(dat, buf) {
-  const bufs = [], nb = +!buf;
-  let bt = 0, ol = 0;
-  for (; dat.length; ) {
-    const st = rzfh(dat, nb || buf);
-    if (typeof st == "object") {
-      if (nb) {
-        buf = null;
-        if (st.w.length == st.u) {
-          bufs.push(buf = st.w);
-          ol += st.u;
-        }
-      } else {
-        bufs.push(buf);
-        st.e = 0;
-      }
-      for (; !st.l; ) {
-        const blk = rzb(dat, st, buf);
-        if (!blk) err(5);
-        if (buf) st.e = st.y;
-        else {
-          bufs.push(blk);
-          ol += blk.length;
-          cpw(st.w, 0, blk.length);
-          st.w.set(blk, st.w.length - blk.length);
-        }
-      }
-      bt = st.b + st.c * 4;
-    } else bt = st;
-    dat = dat.subarray(bt);
-  }
-  return cct(bufs, ol);
-}
-
+// zenoh-web browser client with zenoh-dimos-codecs' decoders, bundled from github.com/jeff-hykin/zenoh-web@d1d0f27a1a6f755def9259a9c541a09241eafae8 and github.com/jeff-hykin/zenoh-dimos-codecs@236fdf5513302880a4a844a680cc475c91dcf96c by run/vendor_zenoh_web. Do not edit.
 // zenoh-web/client/zenoh_web.ts
 var Priority = Object.freeze({
   REAL_TIME: 1,
@@ -584,28 +9,6 @@ var Priority = Object.freeze({
   DATA_LOW: 6,
   BACKGROUND: 7
 });
-var CODECS = Object.freeze([
-  "ros2-image",
-  "ros2-compressed-image",
-  "ros2-depth",
-  "ros2-compressed-depth",
-  "ros2-pointcloud2",
-  "dimos-image",
-  "dimos-compressed-image",
-  "dimos-depth",
-  "dimos-compressed-depth",
-  "dimos-pointcloud2"
-]);
-function codecOutput(codec) {
-  if (codec.endsWith("pointcloud2")) {
-    return "pointcloud";
-  }
-  return codec.endsWith("depth") ? "depth" : "video";
-}
-var builtinCodecInfos = CODECS.map((name) => ({
-  name,
-  output: codecOutput(name) === "video" ? "video" : "data"
-}));
 var codecDecoders = /* @__PURE__ */ new Map();
 function registerCodec(name, decoder) {
   if (typeof name !== "string" || name.length === 0) {
@@ -620,13 +23,6 @@ function registerCodec(name, decoder) {
   }
   codecDecoders.set(name, decoder);
 }
-for (const name of CODECS) {
-  if (codecOutput(name) === "depth") {
-    registerCodec(name, (bytes, message) => message.depth = decodeDepth(bytes));
-  } else if (codecOutput(name) === "pointcloud") {
-    registerCodec(name, (bytes, message) => message.points = decodePointCloud(bytes));
-  }
-}
 var backedUpBytes = 64 * 1024;
 var resumeBytes = 16 * 1024;
 var gatherTimeoutMs = 3e3;
@@ -639,85 +35,6 @@ var clockWindow = 16;
 var initialClockPings = 5;
 var putHeaderBytes = 8;
 var maxPartialMessages = 8;
-var subscribeOptionNames = /* @__PURE__ */ new Set([
-  "delivery",
-  "priority",
-  "bandwidthPriority",
-  "queueSize",
-  "maxAge",
-  "maxHz",
-  "dangerousMinHz",
-  "minQuality",
-  "maxQuality",
-  "qualityToHzTradeoff",
-  "codec",
-  "imageTransport"
-]);
-var publisherOptionNames = /* @__PURE__ */ new Set([
-  "delivery",
-  "priority",
-  "repeatMs",
-  "latencyLimit"
-]);
-function checkNumber(name, value, isValid, expected) {
-  if (value === void 0) {
-    return;
-  }
-  if (typeof value !== "number" || Number.isNaN(value) || !isValid(value)) {
-    throw new RangeError(`zenoh-web: ${name} must be ${expected}, got ${String(value)}`);
-  }
-}
-function checkCommon(options, allowed, where) {
-  for (const name of Object.keys(options)) {
-    if (!allowed.has(name)) {
-      throw new TypeError(`zenoh-web: unknown ${where} option "${name}" (allowed: ${[
-        ...allowed
-      ].join(", ")})`);
-    }
-  }
-  const { delivery, priority } = options;
-  if (delivery !== void 0 && delivery !== "latest" && delivery !== "reliable") {
-    throw new TypeError(`zenoh-web: delivery must be "latest" or "reliable", got ${String(delivery)}`);
-  }
-  checkNumber("priority", priority, (v) => Number.isInteger(v) && v >= 1 && v <= 7, "an integer 1..7 (see Priority)");
-}
-function validateSubscribeOptions(options, codecs = builtinCodecInfos) {
-  checkCommon(options, subscribeOptionNames, "subscribe");
-  const isUnit = (v) => v >= 0 && v <= 1;
-  checkNumber("bandwidthPriority", options.bandwidthPriority, (v) => Number.isFinite(v) && v >= 0, ">= 0");
-  checkNumber("queueSize", options.queueSize, (v) => v === Infinity || Number.isInteger(v) && v >= 1, "an integer >= 1 or Infinity");
-  checkNumber("maxAge", options.maxAge, (v) => Number.isFinite(v) && v > 0, "> 0 (ms)");
-  checkNumber("maxHz", options.maxHz, (v) => Number.isFinite(v) && v > 0, "> 0");
-  checkNumber("dangerousMinHz", options.dangerousMinHz, (v) => Number.isFinite(v) && v >= 0 && v <= (options.maxHz ?? Infinity), ">= 0 and <= maxHz");
-  checkNumber("minQuality", options.minQuality, isUnit, "within 0..1");
-  checkNumber("maxQuality", options.maxQuality, isUnit, "within 0..1");
-  checkNumber("qualityToHzTradeoff", options.qualityToHzTradeoff, isUnit, "within 0..1");
-  if ((options.minQuality ?? 0) > (options.maxQuality ?? 1)) {
-    throw new RangeError("zenoh-web: minQuality must be <= maxQuality");
-  }
-  if (options.imageTransport !== void 0 && options.imageTransport !== "video" && options.imageTransport !== "jpeg") {
-    throw new TypeError(`zenoh-web: imageTransport must be "video" or "jpeg", got ${String(options.imageTransport)}`);
-  }
-  if (options.codec !== void 0) {
-    const codec = codecs.find((info) => info.name === options.codec);
-    if (codec === void 0) {
-      throw new TypeError(`zenoh-web: unknown codec "${String(options.codec)}" (the bridge has: ${codecs.map((info) => info.name).join(", ")})`);
-    }
-    if (codec.output !== "video" && options.imageTransport !== void 0) {
-      throw new TypeError(`zenoh-web: imageTransport applies to video codecs; ${options.codec} sends data`);
-    }
-    if (codec.output === "video" && options.imageTransport !== "jpeg" && options.delivery === "reliable") {
-      throw new TypeError(`zenoh-web: ${options.codec} is a video codec (a lossy video track); use delivery "latest" (or imageTransport "jpeg")`);
-    }
-  } else if (options.imageTransport !== void 0) {
-    throw new TypeError("zenoh-web: imageTransport needs a video codec");
-  }
-}
-function validatePublisherOptions(options) {
-  checkCommon(options, publisherOptionNames, "publisher");
-  checkNumber("repeatMs", options.repeatMs, (v) => Number.isFinite(v) && v > 0, "> 0 (ms)");
-  checkNumber("latencyLimit", options.latencyLimit, (v) => Number.isFinite(v) && v > 0, "> 0 (ms)");
-}
 function channelInit(delivery, maxAge) {
   if (delivery === "reliable") {
     return {
@@ -776,69 +93,6 @@ function decodeFrame(buffer) {
     chunkIndex: view.getUint32(offset + 16, true),
     chunkCount: view.getUint32(offset + 20, true),
     chunk: new Uint8Array(buffer, offset + 24)
-  };
-}
-var depthEncodings = {
-  1: "16UC1",
-  2: "32FC1",
-  3: "mono16"
-};
-function decodeDepth(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes[0] !== 1) {
-    throw new Error(`zenoh-web: unknown depth format version ${bytes[0]}`);
-  }
-  const encoding = depthEncodings[bytes[1]];
-  if (!encoding) {
-    throw new Error(`zenoh-web: unknown depth encoding ${bytes[1]}`);
-  }
-  const width = view.getUint32(4, true);
-  const height = view.getUint32(8, true);
-  const values = decompress(bytes.subarray(20));
-  const aligned = values.byteOffset % 4 === 0 ? values : values.slice();
-  const count = width * height;
-  const data = encoding === "32FC1" ? new Float32Array(aligned.buffer, aligned.byteOffset, count) : new Uint16Array(aligned.buffer, aligned.byteOffset, count);
-  return {
-    width,
-    height,
-    sourceWidth: view.getUint32(12, true),
-    sourceHeight: view.getUint32(16, true),
-    stride: view.getUint16(2, true),
-    encoding,
-    data
-  };
-}
-function decodePointCloud(bytes) {
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  if (bytes[0] !== 1) {
-    throw new Error(`zenoh-web: unknown point cloud format version ${bytes[0]}`);
-  }
-  const hasIntensity = (bytes[1] & 1) === 1;
-  const count = view.getUint32(4, true);
-  const origin = [
-    view.getFloat32(12, true),
-    view.getFloat32(16, true),
-    view.getFloat32(20, true)
-  ];
-  const scale = view.getFloat32(24, true);
-  const voxelSize = view.getFloat32(28, true);
-  const body = decompress(bytes.subarray(40));
-  const quantized = new DataView(body.buffer, body.byteOffset, body.byteLength);
-  const positions = new Float32Array(count * 3);
-  for (let index = 0; index < count * 3; index++) {
-    positions[index] = origin[index % 3] + quantized.getInt16(index * 2, true) * scale;
-  }
-  return {
-    count,
-    sourceCount: view.getUint32(8, true),
-    positions,
-    intensity: hasIntensity ? body.slice(count * 6, count * 7) : null,
-    intensityMin: view.getFloat32(32, true),
-    intensityScale: view.getFloat32(36, true),
-    origin,
-    scale,
-    voxelSize,
-    maxError: voxelSize > 0 ? voxelSize / 2 : scale / 2
   };
 }
 function decodeVideoFrameInfo(bytes) {
@@ -1436,10 +690,10 @@ var ZenohWeb = class {
   rttMs = null;
   /** bridge clock minus this client's clock, from the lowest-RTT recent sample */
   clockOffsetMs = null;
-  /** bridge-side heartbeat, clock and access-control stats */
+  /** bridge-side heartbeat, clock and bandwidth stats */
   bridgeStats = null;
-  /** the codecs the bridge runs (built-in and its host application's), fetched on connect */
-  codecs = builtinCodecInfos;
+  /** the codecs the bridge runs, fetched on connect */
+  codecs = [];
   url;
   options;
   /** this client's clock in ms; put timestamps and clock sync use it */
@@ -1478,9 +732,6 @@ var ZenohWeb = class {
       heartbeatMisses: 3,
       ...options
     };
-    checkNumber("heartbeatHz", this.options.heartbeatHz, (v) => Number.isFinite(v) && v >= 0, ">= 0 (0 = no heartbeat)");
-    checkNumber("heartbeatMisses", this.options.heartbeatMisses, (v) => Number.isInteger(v) && v >= 1, "an integer >= 1");
-    checkNumber("bandwidthTargetFraction", this.options.bandwidthTargetFraction, (v) => v > 0 && v <= 1, "within (0, 1]");
     this.now = this.options.clock ?? (() => performance.timeOrigin + performance.now());
   }
   onState(listener) {
@@ -1643,12 +894,6 @@ var ZenohWeb = class {
       }
       await peer.setRemoteDescription(await response.json());
       await waitOpen(control, openTimeoutMs);
-      if (this.options.bandwidthTargetFraction !== void 0) {
-        await this._request({
-          op: "configure",
-          bandwidthTargetFraction: this.options.bandwidthTargetFraction
-        }, pingTimeoutMs);
-      }
       this.codecs = Object.freeze((await this._request({
         op: "codecs"
       }, pingTimeoutMs)).codecs);
@@ -1788,8 +1033,8 @@ var ZenohWeb = class {
       }));
     });
   }
+  /** Options are checked by the bridge: a bad one rejects the subscription (`state`, `ready()`). */
   subscribe(key, options, callback) {
-    validateSubscribeOptions(options ?? {}, this.codecs);
     const subscription = new Subscription(this, this.#nextId++, key, {
       ...options
     }, callback);
@@ -1797,7 +1042,6 @@ var ZenohWeb = class {
     return subscription;
   }
   publisher(key, options = {}) {
-    validatePublisherOptions(options);
     const publisher = new Publisher(this, this.#nextId++, key, {
       ...options
     });
@@ -1844,7 +1088,7 @@ var ZenohWeb = class {
   /**
      * Keys currently live on the zenoh network under `filter`, including ones never subscribed to.
      * See SPEC.md "Topic enumeration" for which kinds of keys can and can't be seen.
-     * `probeMs: 0` lists declarations and tokens only, without subscribing to `filter`.
+     * `probeMs: 0` lists liveliness tokens only, without subscribing to `filter`.
      */
   async listTopics(filter = "**", { probeMs = 600 } = {}) {
     const response = await this._request({
@@ -1874,7 +1118,6 @@ var ZenohWeb = class {
       this.bridgeStats = {
         clock: response.clock,
         heartbeat: response.heartbeat,
-        access: response.access,
         bandwidth: response.bandwidth ?? null
       };
     }
@@ -1945,6 +1188,675 @@ async function connect(url, options = {}) {
   client._startStats();
   return client;
 }
+
+// zenoh-dimos-codecs/client/vendor/fzstd.ts
+var ab = ArrayBuffer;
+var u8 = Uint8Array;
+var u16 = Uint16Array;
+var i16 = Int16Array;
+var i32 = Int32Array;
+var slc = (v, s, e) => {
+  if (u8.prototype.slice) return u8.prototype.slice.call(v, s, e);
+  if (s == null || s < 0) s = 0;
+  if (e == null || e > v.length) e = v.length;
+  const n = new u8(e - s);
+  n.set(v.subarray(s, e));
+  return n;
+};
+var fill = (v, n, s, e) => {
+  if (u8.prototype.fill) return u8.prototype.fill.call(v, n, s, e);
+  if (s == null || s < 0) s = 0;
+  if (e == null || e > v.length) e = v.length;
+  for (; s < e; ++s) v[s] = n;
+  return v;
+};
+var cpw = (v, t, s, e) => {
+  if (u8.prototype.copyWithin) return u8.prototype.copyWithin.call(v, t, s, e);
+  if (s == null || s < 0) s = 0;
+  if (e == null || e > v.length) e = v.length;
+  while (s < e) {
+    v[t++] = v[s++];
+  }
+};
+var ec = [
+  "invalid zstd data",
+  "window size too large (>2046MB)",
+  "invalid block type",
+  "FSE accuracy too high",
+  "match distance too far back",
+  "unexpected EOF"
+];
+var err = (ind, msg, nt) => {
+  const e = new Error(msg || ec[ind]);
+  e.code = ind;
+  if (Error.captureStackTrace) Error.captureStackTrace(e, err);
+  if (!nt) throw e;
+  return e;
+};
+var rb = (d, b, n) => {
+  let i = 0, o = 0;
+  for (; i < n; ++i) o |= d[b++] << (i << 3);
+  return o;
+};
+var b4 = (d, b) => (d[b] | d[b + 1] << 8 | d[b + 2] << 16 | d[b + 3] << 24) >>> 0;
+var rzfh = (dat, w) => {
+  const n3 = dat[0] | dat[1] << 8 | dat[2] << 16;
+  if (n3 == 3126568 && dat[3] == 253) {
+    const flg = dat[4];
+    const ss = flg >> 5 & 1, cc = flg >> 2 & 1, df = flg & 3, fcf = flg >> 6;
+    if (flg & 8) err(0);
+    let bt = 6 - ss;
+    const db = df == 3 ? 4 : df;
+    const di = rb(dat, bt, db);
+    bt += db;
+    const fsb = fcf ? 1 << fcf : ss;
+    const fss = rb(dat, bt, fsb) + (fcf == 1 && 256);
+    let ws = fss;
+    if (!ss) {
+      const wb = 1 << 10 + (dat[5] >> 3);
+      ws = wb + (wb >> 3) * (dat[5] & 7);
+    }
+    if (ws > 2145386496) err(1);
+    const buf = new u8((w == 1 ? fss || ws : w ? 0 : ws) + 12);
+    buf[0] = 1, buf[4] = 4, buf[8] = 8;
+    return {
+      b: bt + fsb,
+      y: 0,
+      l: 0,
+      d: di,
+      w: w && w != 1 ? w : buf.subarray(12),
+      e: ws,
+      o: new i32(buf.buffer, 0, 3),
+      u: fss,
+      c: cc,
+      m: Math.min(131072, ws)
+    };
+  } else if ((n3 >> 4 | dat[3] << 20) == 25481893) {
+    return b4(dat, 4) + 8;
+  }
+  err(0);
+};
+var msb = (val) => {
+  let bits = 0;
+  for (; 1 << bits <= val; ++bits) ;
+  return bits - 1;
+};
+var rfse = (dat, bt, mal) => {
+  let tpos = (bt << 3) + 4;
+  const al = (dat[bt] & 15) + 5;
+  if (al > mal) err(3);
+  const sz = 1 << al;
+  let probs = sz, sym = -1, re = -1, i = -1, ht = sz;
+  const buf = new ab(512 + (sz << 2));
+  const freq = new i16(buf, 0, 256);
+  const dstate = new u16(buf, 0, 256);
+  const nstate = new u16(buf, 512, sz);
+  const bb1 = 512 + (sz << 1);
+  const syms = new u8(buf, bb1, sz);
+  const nbits = new u8(buf, bb1 + sz);
+  while (sym < 255 && probs > 0) {
+    const bits = msb(probs + 1);
+    const cbt = tpos >> 3;
+    const msk = (1 << bits + 1) - 1;
+    let val = (dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (tpos & 7) & msk;
+    const msk1fb = (1 << bits) - 1;
+    const msv = msk - probs - 1;
+    const sval = val & msk1fb;
+    if (sval < msv) tpos += bits, val = sval;
+    else {
+      tpos += bits + 1;
+      if (val > msk1fb) val -= msv;
+    }
+    freq[++sym] = --val;
+    if (val == -1) {
+      probs += val;
+      syms[--ht] = sym;
+    } else probs -= val;
+    if (!val) {
+      do {
+        const rbt = tpos >> 3;
+        re = (dat[rbt] | dat[rbt + 1] << 8) >> (tpos & 7) & 3;
+        tpos += 2;
+        sym += re;
+      } while (re == 3);
+    }
+  }
+  if (sym > 255 || probs) err(0);
+  let sympos = 0;
+  const sstep = (sz >> 1) + (sz >> 3) + 3;
+  const smask = sz - 1;
+  for (let s = 0; s <= sym; ++s) {
+    const sf = freq[s];
+    if (sf < 1) {
+      dstate[s] = -sf;
+      continue;
+    }
+    for (i = 0; i < sf; ++i) {
+      syms[sympos] = s;
+      do {
+        sympos = sympos + sstep & smask;
+      } while (sympos >= ht);
+    }
+  }
+  if (sympos) err(0);
+  for (i = 0; i < sz; ++i) {
+    const ns = dstate[syms[i]]++;
+    const nb = nbits[i] = al - msb(ns);
+    nstate[i] = (ns << nb) - sz;
+  }
+  return [
+    tpos + 7 >> 3,
+    {
+      b: al,
+      s: syms,
+      n: nbits,
+      t: nstate
+    }
+  ];
+};
+var rhu = (dat, bt) => {
+  let i = 0, wc = -1;
+  const buf = new u8(292), hb = dat[bt];
+  const hw = buf.subarray(0, 256);
+  const rc = buf.subarray(256, 268);
+  const ri = new u16(buf.buffer, 268);
+  if (hb < 128) {
+    const [ebt, fdt] = rfse(dat, bt + 1, 6);
+    bt += hb;
+    const epos = ebt << 3;
+    const lb = dat[bt];
+    if (!lb) err(0);
+    let st1 = 0, st2 = 0, btr1 = fdt.b, btr2 = btr1;
+    let fpos = (++bt << 3) - 8 + msb(lb);
+    for (; ; ) {
+      fpos -= btr1;
+      if (fpos < epos) break;
+      let cbt = fpos >> 3;
+      st1 += (dat[cbt] | dat[cbt + 1] << 8) >> (fpos & 7) & (1 << btr1) - 1;
+      hw[++wc] = fdt.s[st1];
+      fpos -= btr2;
+      if (fpos < epos) break;
+      cbt = fpos >> 3;
+      st2 += (dat[cbt] | dat[cbt + 1] << 8) >> (fpos & 7) & (1 << btr2) - 1;
+      hw[++wc] = fdt.s[st2];
+      btr1 = fdt.n[st1];
+      st1 = fdt.t[st1];
+      btr2 = fdt.n[st2];
+      st2 = fdt.t[st2];
+    }
+    if (++wc > 255) err(0);
+  } else {
+    wc = hb - 127;
+    for (; i < wc; i += 2) {
+      const byte = dat[++bt];
+      hw[i] = byte >> 4;
+      hw[i + 1] = byte & 15;
+    }
+    ++bt;
+  }
+  let wes = 0;
+  for (i = 0; i < wc; ++i) {
+    const wt = hw[i];
+    if (wt > 11) err(0);
+    wes += wt && 1 << wt - 1;
+  }
+  const mb = msb(wes) + 1;
+  const ts = 1 << mb;
+  const rem = ts - wes;
+  if (rem & rem - 1) err(0);
+  hw[wc++] = msb(rem) + 1;
+  for (i = 0; i < wc; ++i) {
+    const wt = hw[i];
+    ++rc[hw[i] = wt && mb + 1 - wt];
+  }
+  const hbuf = new u8(ts << 1);
+  const syms = hbuf.subarray(0, ts), nb = hbuf.subarray(ts);
+  ri[mb] = 0;
+  for (i = mb; i > 0; --i) {
+    const pv = ri[i];
+    fill(nb, i, pv, ri[i - 1] = pv + rc[i] * (1 << mb - i));
+  }
+  if (ri[0] != ts) err(0);
+  for (i = 0; i < wc; ++i) {
+    const bits = hw[i];
+    if (bits) {
+      const code = ri[bits];
+      fill(syms, i, code, ri[bits] = code + (1 << mb - bits));
+    }
+  }
+  return [
+    bt,
+    {
+      n: nb,
+      b: mb,
+      s: syms
+    }
+  ];
+};
+var dllt = rfse(/* @__PURE__ */ new u8([
+  81,
+  16,
+  99,
+  140,
+  49,
+  198,
+  24,
+  99,
+  12,
+  33,
+  196,
+  24,
+  99,
+  102,
+  102,
+  134,
+  70,
+  146,
+  4
+]), 0, 6)[1];
+var dmlt = rfse(/* @__PURE__ */ new u8([
+  33,
+  20,
+  196,
+  24,
+  99,
+  140,
+  33,
+  132,
+  16,
+  66,
+  8,
+  33,
+  132,
+  16,
+  66,
+  8,
+  33,
+  68,
+  68,
+  68,
+  68,
+  68,
+  68,
+  68,
+  68,
+  36,
+  9
+]), 0, 6)[1];
+var doct = rfse(/* @__PURE__ */ new u8([
+  32,
+  132,
+  16,
+  66,
+  102,
+  70,
+  68,
+  68,
+  68,
+  68,
+  36,
+  73,
+  2
+]), 0, 5)[1];
+var b2bl = (b, s) => {
+  const len = b.length, bl = new i32(len);
+  for (let i = 0; i < len; ++i) {
+    bl[i] = s;
+    s += 1 << b[i];
+  }
+  return bl;
+};
+var llb = /* @__PURE__ */ new u8(new i32([
+  0,
+  0,
+  0,
+  0,
+  16843009,
+  50528770,
+  134678020,
+  202050057,
+  269422093
+]).buffer, 0, 36);
+var llbl = /* @__PURE__ */ b2bl(llb, 0);
+var mlb = /* @__PURE__ */ new u8(new i32([
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  16843009,
+  50528770,
+  117769220,
+  185207048,
+  252579084,
+  16
+]).buffer, 0, 53);
+var mlbl = /* @__PURE__ */ b2bl(mlb, 3);
+var dhu = (dat, out, hu) => {
+  const len = dat.length, ss = out.length, lb = dat[len - 1], msk = (1 << hu.b) - 1, eb = -hu.b;
+  if (!lb) err(0);
+  let st = 0, btr = hu.b, pos = (len << 3) - 8 + msb(lb) - btr, i = -1;
+  for (; pos > eb && i < ss; ) {
+    const cbt = pos >> 3;
+    const val = (dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (pos & 7);
+    st = (st << btr | val) & msk;
+    out[++i] = hu.s[st];
+    pos -= btr = hu.n[st];
+  }
+  if (pos != eb || i + 1 != ss) err(0);
+};
+var dhu4 = (dat, out, hu) => {
+  let bt = 6;
+  const ss = out.length, sz1 = ss + 3 >> 2, sz2 = sz1 << 1, sz3 = sz1 + sz2;
+  dhu(dat.subarray(bt, bt += dat[0] | dat[1] << 8), out.subarray(0, sz1), hu);
+  dhu(dat.subarray(bt, bt += dat[2] | dat[3] << 8), out.subarray(sz1, sz2), hu);
+  dhu(dat.subarray(bt, bt += dat[4] | dat[5] << 8), out.subarray(sz2, sz3), hu);
+  dhu(dat.subarray(bt), out.subarray(sz3), hu);
+};
+var rzb = (dat, st, out) => {
+  let bt = st.b;
+  const b0 = dat[bt], btype = b0 >> 1 & 3;
+  st.l = b0 & 1;
+  const sz = b0 >> 3 | dat[bt + 1] << 5 | dat[bt + 2] << 13;
+  const ebt = (bt += 3) + sz;
+  if (btype == 1) {
+    if (bt >= dat.length) return;
+    st.b = bt + 1;
+    if (out) {
+      fill(out, dat[bt], st.y, st.y += sz);
+      return out;
+    }
+    return fill(new u8(sz), dat[bt]);
+  }
+  if (ebt > dat.length) return;
+  if (btype == 0) {
+    st.b = ebt;
+    if (out) {
+      out.set(dat.subarray(bt, ebt), st.y);
+      st.y += sz;
+      return out;
+    }
+    return slc(dat, bt, ebt);
+  }
+  if (btype == 2) {
+    const b3 = dat[bt], lbt = b3 & 3, sf = b3 >> 2 & 3;
+    let lss = b3 >> 4, lcs = 0, s4 = 0;
+    if (lbt < 2) {
+      if (sf & 1) lss |= dat[++bt] << 4 | (sf & 2 && dat[++bt] << 12);
+      else lss = b3 >> 3;
+    } else {
+      s4 = sf;
+      if (sf < 2) lss |= (dat[++bt] & 63) << 4, lcs = dat[bt] >> 6 | dat[++bt] << 2;
+      else if (sf == 2) lss |= dat[++bt] << 4 | (dat[++bt] & 3) << 12, lcs = dat[bt] >> 2 | dat[++bt] << 6;
+      else lss |= dat[++bt] << 4 | (dat[++bt] & 63) << 12, lcs = dat[bt] >> 6 | dat[++bt] << 2 | dat[++bt] << 10;
+    }
+    ++bt;
+    let buf = out ? out.subarray(st.y, st.y + st.m) : new u8(st.m);
+    let spl = buf.length - lss;
+    if (lbt == 0) buf.set(dat.subarray(bt, bt += lss), spl);
+    else if (lbt == 1) fill(buf, dat[bt++], spl);
+    else {
+      let hu = st.h;
+      if (lbt == 2) {
+        const hud = rhu(dat, bt);
+        lcs += bt - (bt = hud[0]);
+        st.h = hu = hud[1];
+      } else if (!hu) err(0);
+      (s4 ? dhu4 : dhu)(dat.subarray(bt, bt += lcs), buf.subarray(spl), hu);
+    }
+    let ns = dat[bt++];
+    if (ns) {
+      if (ns == 255) ns = (dat[bt++] | dat[bt++] << 8) + 32512;
+      else if (ns > 127) ns = ns - 128 << 8 | dat[bt++];
+      const scm = dat[bt++];
+      if (scm & 3) err(0);
+      const dts = [
+        dmlt,
+        doct,
+        dllt
+      ];
+      for (let i = 2; i > -1; --i) {
+        const md = scm >> (i << 1) + 2 & 3;
+        if (md == 1) {
+          const rbuf = new u8([
+            0,
+            0,
+            dat[bt++]
+          ]);
+          dts[i] = {
+            s: rbuf.subarray(2, 3),
+            n: rbuf.subarray(0, 1),
+            t: new u16(rbuf.buffer, 0, 1),
+            b: 0
+          };
+        } else if (md == 2) {
+          [bt, dts[i]] = rfse(dat, bt, 9 - (i & 1));
+        } else if (md == 3) {
+          if (!st.t) err(0);
+          dts[i] = st.t[i];
+        }
+      }
+      const [mlt, oct, llt] = st.t = dts;
+      const lb = dat[ebt - 1];
+      if (!lb) err(0);
+      let spos = (ebt << 3) - 8 + msb(lb) - llt.b, cbt = spos >> 3, oubt = 0;
+      let lst = (dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << llt.b) - 1;
+      cbt = (spos -= oct.b) >> 3;
+      let ost = (dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << oct.b) - 1;
+      cbt = (spos -= mlt.b) >> 3;
+      let mst = (dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << mlt.b) - 1;
+      for (++ns; --ns; ) {
+        const llc = llt.s[lst];
+        const lbtr = llt.n[lst];
+        const mlc = mlt.s[mst];
+        const mbtr = mlt.n[mst];
+        const ofc = oct.s[ost];
+        const obtr = oct.n[ost];
+        cbt = (spos -= ofc) >> 3;
+        const ofp = 1 << ofc;
+        let off = ofp + ((dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16 | dat[cbt + 3] << 24) >>> (spos & 7) & ofp - 1);
+        cbt = (spos -= mlb[mlc]) >> 3;
+        let ml = mlbl[mlc] + ((dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (spos & 7) & (1 << mlb[mlc]) - 1);
+        cbt = (spos -= llb[llc]) >> 3;
+        const ll = llbl[llc] + ((dat[cbt] | dat[cbt + 1] << 8 | dat[cbt + 2] << 16) >> (spos & 7) & (1 << llb[llc]) - 1);
+        cbt = (spos -= lbtr) >> 3;
+        lst = llt.t[lst] + ((dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << lbtr) - 1);
+        cbt = (spos -= mbtr) >> 3;
+        mst = mlt.t[mst] + ((dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << mbtr) - 1);
+        cbt = (spos -= obtr) >> 3;
+        ost = oct.t[ost] + ((dat[cbt] | dat[cbt + 1] << 8) >> (spos & 7) & (1 << obtr) - 1);
+        if (off > 3) {
+          st.o[2] = st.o[1];
+          st.o[1] = st.o[0];
+          st.o[0] = off -= 3;
+        } else {
+          const idx = off - (ll != 0);
+          if (idx) {
+            off = idx == 3 ? st.o[0] - 1 : st.o[idx];
+            if (idx > 1) st.o[2] = st.o[1];
+            st.o[1] = st.o[0];
+            st.o[0] = off;
+          } else off = st.o[0];
+        }
+        for (let i = 0; i < ll; ++i) {
+          buf[oubt + i] = buf[spl + i];
+        }
+        oubt += ll, spl += ll;
+        let stin = oubt - off;
+        if (stin < 0) {
+          let len = -stin;
+          const bs = st.e + stin;
+          if (len > ml) len = ml;
+          for (let i = 0; i < len; ++i) {
+            buf[oubt + i] = st.w[bs + i];
+          }
+          oubt += len, ml -= len, stin = 0;
+        }
+        for (let i = 0; i < ml; ++i) {
+          buf[oubt + i] = buf[stin + i];
+        }
+        oubt += ml;
+      }
+      if (oubt != spl) {
+        while (spl < buf.length) {
+          buf[oubt++] = buf[spl++];
+        }
+      } else oubt = buf.length;
+      if (out) st.y += oubt;
+      else buf = slc(buf, 0, oubt);
+    } else if (out) {
+      st.y += lss;
+      if (spl) {
+        for (let i = 0; i < lss; ++i) {
+          buf[i] = buf[spl + i];
+        }
+      }
+    } else if (spl) buf = slc(buf, spl);
+    st.b = ebt;
+    return buf;
+  }
+  err(2);
+};
+var cct = (bufs, ol) => {
+  if (bufs.length == 1) return bufs[0];
+  const buf = new u8(ol);
+  for (let i = 0, b = 0; i < bufs.length; ++i) {
+    const chk = bufs[i];
+    buf.set(chk, b);
+    b += chk.length;
+  }
+  return buf;
+};
+function decompress(dat, buf) {
+  const bufs = [], nb = +!buf;
+  let bt = 0, ol = 0;
+  for (; dat.length; ) {
+    const st = rzfh(dat, nb || buf);
+    if (typeof st == "object") {
+      if (nb) {
+        buf = null;
+        if (st.w.length == st.u) {
+          bufs.push(buf = st.w);
+          ol += st.u;
+        }
+      } else {
+        bufs.push(buf);
+        st.e = 0;
+      }
+      for (; !st.l; ) {
+        const blk = rzb(dat, st, buf);
+        if (!blk) err(5);
+        if (buf) st.e = st.y;
+        else {
+          bufs.push(blk);
+          ol += blk.length;
+          cpw(st.w, 0, blk.length);
+          st.w.set(blk, st.w.length - blk.length);
+        }
+      }
+      bt = st.b + st.c * 4;
+    } else bt = st;
+    dat = dat.subarray(bt);
+  }
+  return cct(bufs, ol);
+}
+
+// zenoh-dimos-codecs/client/dimos_codecs.ts
+var CODECS = Object.freeze([
+  "ros2-image",
+  "ros2-compressed-image",
+  "ros2-depth",
+  "ros2-compressed-depth",
+  "ros2-pointcloud2",
+  "dimos-image",
+  "dimos-compressed-image",
+  "dimos-depth",
+  "dimos-compressed-depth",
+  "dimos-pointcloud2"
+]);
+function codecOutput(codec) {
+  if (codec.endsWith("pointcloud2")) {
+    return "pointcloud";
+  }
+  return codec.endsWith("depth") ? "depth" : "video";
+}
+var depthEncodings = {
+  1: "16UC1",
+  2: "32FC1",
+  3: "mono16"
+};
+function decodeDepth(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes[0] !== 1) {
+    throw new Error(`zenoh-dimos-codecs: unknown depth format version ${bytes[0]}`);
+  }
+  const encoding = depthEncodings[bytes[1]];
+  if (!encoding) {
+    throw new Error(`zenoh-dimos-codecs: unknown depth encoding ${bytes[1]}`);
+  }
+  const width = view.getUint32(4, true);
+  const height = view.getUint32(8, true);
+  const values = decompress(bytes.subarray(20));
+  const aligned = values.byteOffset % 4 === 0 ? values : values.slice();
+  const count = width * height;
+  const data = encoding === "32FC1" ? new Float32Array(aligned.buffer, aligned.byteOffset, count) : new Uint16Array(aligned.buffer, aligned.byteOffset, count);
+  return {
+    width,
+    height,
+    sourceWidth: view.getUint32(12, true),
+    sourceHeight: view.getUint32(16, true),
+    stride: view.getUint16(2, true),
+    encoding,
+    data
+  };
+}
+function decodePointCloud(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (bytes[0] !== 2) {
+    throw new Error(`zenoh-dimos-codecs: unknown point cloud format version ${bytes[0]}`);
+  }
+  const hasIntensity = (bytes[1] & 1) === 1;
+  const count = view.getUint32(4, true);
+  const origin = [
+    view.getFloat32(12, true),
+    view.getFloat32(16, true),
+    view.getFloat32(20, true)
+  ];
+  const scale = view.getFloat32(24, true);
+  const keepEvery = view.getUint32(28, true);
+  const body = decompress(bytes.subarray(40));
+  const quantized = new DataView(body.buffer, body.byteOffset, body.byteLength);
+  const positions = new Float32Array(count * 3);
+  for (let index = 0; index < count * 3; index++) {
+    positions[index] = origin[index % 3] + quantized.getInt16(index * 2, true) * scale;
+  }
+  return {
+    count,
+    sourceCount: view.getUint32(8, true),
+    positions,
+    intensity: hasIntensity ? body.slice(count * 6, count * 7) : null,
+    intensityMin: view.getFloat32(32, true),
+    intensityScale: view.getFloat32(36, true),
+    origin,
+    scale,
+    keepEvery,
+    maxError: scale / 2
+  };
+}
+function registerDimosCodecs(registerCodec2) {
+  for (const name of CODECS) {
+    const output = codecOutput(name);
+    if (output !== "video") {
+      registerCodec2(name, output === "depth" ? decodeDepth : decodePointCloud);
+    }
+  }
+}
+
+// entry.ts
+registerDimosCodecs(registerCodec);
 export {
   CODECS,
   Priority,
@@ -1959,6 +1871,5 @@ export {
   decodeVideoFrameInfo,
   encodePut,
   registerCodec,
-  validatePublisherOptions,
-  validateSubscribeOptions
+  registerDimosCodecs
 };

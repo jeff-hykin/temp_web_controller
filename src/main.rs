@@ -180,7 +180,8 @@ async fn main() -> Result<()> {
         },
     );
 
-    let zenoh_config = zenoh_io::config(args.zenoh_config.as_deref(), &args.zenoh_connect)?;
+    let (zenoh_config, loopback_port) =
+        zenoh_io::with_loopback_listener(zenoh_io::config(args.zenoh_config.as_deref(), &args.zenoh_connect)?)?;
     let session = zenoh_io::open(zenoh_config.clone())
         .await
         .context("opening the zenoh session")?;
@@ -208,7 +209,7 @@ async fn main() -> Result<()> {
         &args.zenoh_web,
         args.bind,
         zenoh_config,
-        zenoh_io::local_tcp_port(&session).await,
+        Some(loopback_port),
     )
     .await?;
 

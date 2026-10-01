@@ -140,8 +140,11 @@ pub async fn use_or_start(
             .insert_json5("connect/endpoints", &serde_json::to_string(&endpoints)?)
             .map_err(|error| anyhow!("{error}"))?;
     }
-    let server = zenoh_web::Server::builder()
-        .zenoh_config(config)
+    let mut builder = zenoh_web::Server::builder().zenoh_config(config);
+    for codec in zenoh_dimos_codecs::all() {
+        builder = builder.shared_codec(codec);
+    }
+    let server = builder
         .build()
         .await
         .context("starting zenoh-web in-process")?;
