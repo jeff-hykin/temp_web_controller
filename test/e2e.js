@@ -134,7 +134,7 @@ async function until(condition, timeoutMs, intervalMs = 200) {
 }
 
 /** zenoh-web-cli at a commit that pins the same zenoh-web and zenoh-dimos-codecs as Cargo.toml */
-const ZENOH_WEB_CLI_REV = "0fe2c1f9aad60b25534887204ffa9dde38506c86"
+const ZENOH_WEB_CLI_REV = "671c30591094953def2452d1e6b72a737816bbd4"
 
 async function zenohWebBinary() {
     const fromEnvironment = Deno.env.get("ZENOH_WEB_BIN")
@@ -300,27 +300,6 @@ async function scenario(name, { external }) {
         `${name}: the zenoh CompressedImage camera shows as video with the fixture's colours (${JSON.stringify(samples[CAMERAS.zenohColor])})`)
     check(samples[CAMERAS.lcmDepth]?.kind === "canvas" && samples[CAMERAS.lcmDepth].litFraction > 0.9 && samples[CAMERAS.lcmDepth].width === 320,
         `${name}: the lcm 16UC1 camera is drawn as depth, every pixel coloured (${JSON.stringify(samples[CAMERAS.lcmDepth])})`)
-    // ?imageTransport=jpeg: the same camera as JPEG files drawn on a canvas
-    const jpegPage = await browser.newPage(`${base}/?imageTransport=jpeg`)
-    await until(() => jpegPage.evaluate((key) => {
-        const chip = document.querySelector(`#camera-picker .chip[data-key="${CSS.escape(key)}"]`)
-        if (chip && !chip.classList.contains("on")) {
-            chip.click()
-        }
-        return chip?.classList.contains("on") || null
-    }, { args: [CAMERAS.lcmColor] }), 20000)
-    const jpegTile = await until(() => jpegPage.evaluate((key) => {
-        const tile = document.querySelector(`#streams .tile[data-key="${CSS.escape(key)}"]`)
-        const canvas = tile?.querySelector("canvas")
-        if (!canvas || !canvas.width || !tile.querySelector(".tile-bar span").textContent.includes("jpeg")) {
-            return null
-        }
-        const pixels = canvas.getContext("2d").getImageData(0, 0, canvas.width, canvas.height).data
-        const at = (x, y) => [...pixels.slice((Math.floor(y * canvas.height) * canvas.width + Math.floor(x * canvas.width)) * 4, (Math.floor(y * canvas.height) * canvas.width + Math.floor(x * canvas.width)) * 4 + 3)]
-        return { width: canvas.width, topLeft: at(0.25, 0.25), topRight: at(0.75, 0.25), bottomLeft: at(0.25, 0.75) }
-    }, { args: [CAMERAS.lcmColor] }), 20000)
-    check(redGreenBlue(jpegTile), `${name}: with ?imageTransport=jpeg the camera arrives as JPEG pictures on a canvas (${JSON.stringify(jpegTile)})`)
-    await jpegPage.close()
     const watched = (await (await fetch(`${base}/api/status`)).json()).topics.find((topic) => topic.topic === "test_lcm_depth")
     check(watched?.encoding === "16UC1", `${name}: once watched, the lcm depth camera is reassembled (encoding ${watched?.encoding})`)
 

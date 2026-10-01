@@ -41,8 +41,8 @@
                             lockFile = ./Cargo.lock;
                             # zenoh-web and zenoh-dimos-codecs are git dependencies; update with the revs in Cargo.toml.
                             outputHashes = {
-                                "zenoh-web-0.3.0" = "sha256-pPUWO5/8w3j+IycQwYNTYK4F04OJZHM/ECklrg5TIXU=";
-                                "zenoh-dimos-codecs-0.1.0" = "sha256-YVJmQ19GF/1u4j37oriGc5f4wTTEJOmeCS8Sr2+etJY=";
+                                "zenoh-web-0.3.0" = "sha256-tCo2BA3KOsmnrwiDB6mx+drX4AlFSXJUQbPsnytI+Z4=";
+                                "zenoh-dimos-codecs-0.1.0" = "sha256-Ouku9YVZD4RfqkN8esd/lMiswWhPgoTuJ1xiNEyBwiU=";
                             };
                         };
                     };

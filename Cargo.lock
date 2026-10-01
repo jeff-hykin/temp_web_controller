@@ -5091,7 +5091,7 @@ dependencies = [
 [[package]]
 name = "zenoh-dimos-codecs"
 version = "0.1.0"
-source = "git+https://github.com/jeff-hykin/zenoh-dimos-codecs?rev=236fdf5513302880a4a844a680cc475c91dcf96c#236fdf5513302880a4a844a680cc475c91dcf96c"
+source = "git+https://github.com/jeff-hykin/zenoh-dimos-codecs?rev=8f59c8914c7e5600e2173615ce2b64e16f11b138#8f59c8914c7e5600e2173615ce2b64e16f11b138"
 dependencies = [
  "anyhow",
  "image-webp",
@@ -5511,7 +5511,7 @@ dependencies = [
 [[package]]
 name = "zenoh-web"
 version = "0.3.0"
-source = "git+https://github.com/jeff-hykin/zenoh-web?rev=d1d0f27a1a6f755def9259a9c541a09241eafae8#d1d0f27a1a6f755def9259a9c541a09241eafae8"
+source = "git+https://github.com/jeff-hykin/zenoh-web?rev=1aa39731af8b4f6599ee3ef0d00e81106d9cd502#1aa39731af8b4f6599ee3ef0d00e81106d9cd502"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5519,7 +5519,6 @@ dependencies = [
  "base64",
  "bytes",
  "futures",
- "jpeg-encoder",
  "log",
  "openh264",
  "serde",
@@ -5530,7 +5529,6 @@ dependencies = [
  "zenoh-ext",
  "zenoh-web-rtc",
  "zenoh-web-webrtc",
- "zune-jpeg",
 ]
 
 [[package]]

@@ -1,4 +1,4 @@
-// zenoh-web browser client with zenoh-dimos-codecs' decoders, bundled from github.com/jeff-hykin/zenoh-web@d1d0f27a1a6f755def9259a9c541a09241eafae8 and github.com/jeff-hykin/zenoh-dimos-codecs@236fdf5513302880a4a844a680cc475c91dcf96c by run/vendor_zenoh_web. Do not edit.
+// zenoh-web browser client with zenoh-dimos-codecs' decoders, bundled from github.com/jeff-hykin/zenoh-web@1aa39731af8b4f6599ee3ef0d00e81106d9cd502 and github.com/jeff-hykin/zenoh-dimos-codecs@8f59c8914c7e5600e2173615ce2b64e16f11b138 by run/vendor_zenoh_web. Do not edit.
 // zenoh-web/client/zenoh_web.ts
 var Priority = Object.freeze({
   REAL_TIME: 1,
@@ -262,18 +262,9 @@ var Subscription = class extends Endpoint {
   #bytesSinceAck;
   #ackTimer;
   #partials;
-  /** a video codec sending JPEG files on the data channel */
-  #jpeg;
-  /** jpeg: the newest message waiting for its picture to decode (older ones are dropped) */
-  #pendingImage;
-  #decodingImage;
-  /** jpeg: pictures replaced by a newer one before they finished decoding */
-  imagesSkipped;
   constructor(owner, id, key, options, callback) {
-    super(owner, id, key), this.options = options, this.callback = callback, this.received = 0, this.partialDropped = 0, this.decodeErrors = 0, this.mediaStream = null, this.#warnedNoDecoder = false, this.#videoTransceiver = null, this.#droppedBefore = 0, this.#firstSeq = -1, this.#maxSeq = -1, this.#receivedOnChannel = 0, this.#highestConsumedFrame = -1, this.#bytesSinceAck = 0, this.#ackTimer = null, this.#partials = /* @__PURE__ */ new Map(), this.#pendingImage = null, this.#decodingImage = false, this.imagesSkipped = 0;
-    const output = options.codec === void 0 ? null : owner.codecs.find((info) => info.name === options.codec)?.output ?? "data";
-    this.#jpeg = output === "video" && options.imageTransport === "jpeg";
-    this.codecKind = this.#jpeg ? "data" : output;
+    super(owner, id, key), this.options = options, this.callback = callback, this.received = 0, this.partialDropped = 0, this.decodeErrors = 0, this.mediaStream = null, this.#warnedNoDecoder = false, this.#videoTransceiver = null, this.#droppedBefore = 0, this.#firstSeq = -1, this.#maxSeq = -1, this.#receivedOnChannel = 0, this.#highestConsumedFrame = -1, this.#bytesSinceAck = 0, this.#ackTimer = null, this.#partials = /* @__PURE__ */ new Map();
+    this.codecKind = options.codec === void 0 ? null : owner.codecs.find((info) => info.name === options.codec)?.output ?? "data";
   }
   get state() {
     if (this.closed) {
@@ -418,9 +409,6 @@ var Subscription = class extends Endpoint {
         message.mediaStream = this.mediaStream ?? void 0;
         return true;
       }
-      if (this.#jpeg) {
-        return true;
-      }
       const name = String(this.options.codec);
       const decoder = codecDecoders.get(name);
       if (decoder !== void 0) {
@@ -448,50 +436,11 @@ var Subscription = class extends Endpoint {
     if (message.seq > this.#maxSeq) {
       this.#maxSeq = message.seq;
     }
-    if (this.#jpeg && typeof createImageBitmap === "function") {
-      if (this.#pendingImage !== null) {
-        this.imagesSkipped++;
-      }
-      this.#pendingImage = message;
-      void this.#decodeImages();
-      return;
-    }
-    this.#callback(message);
-  }
-  #callback(message) {
     try {
       this.callback(message);
     } catch (error) {
       console.error(`zenoh-web: subscriber callback for ${this.key} threw`, error);
     }
-  }
-  /** One decode at a time, newest first: a picture that arrives during a decode replaces any waiting one. */
-  async #decodeImages() {
-    if (this.#decodingImage) {
-      return;
-    }
-    this.#decodingImage = true;
-    while (this.#pendingImage !== null && !this.closed) {
-      const message = this.#pendingImage;
-      this.#pendingImage = null;
-      try {
-        message.image = await createImageBitmap(new Blob([
-          message.bytes
-        ], {
-          type: "image/jpeg"
-        }));
-      } catch (error) {
-        this.decodeErrors++;
-        console.error(`zenoh-web: JPEG on ${message.key} did not decode`, error);
-        continue;
-      }
-      if (this.closed) {
-        message.image.close();
-        break;
-      }
-      this.#callback(message);
-    }
-    this.#decodingImage = false;
   }
   /** Tells the bridge we processed every frame up to frameId: 4 bytes, little endian. */
   #consumed(channel, frameId, byteLength) {

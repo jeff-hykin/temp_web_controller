@@ -23,8 +23,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 # zenoh-web pins 1.6.2 (1.7.0-1.10.1 deadlock answering the admin space); its types cross our API
 zenoh = { version = "=1.6.2", features = ["unstable"] }
 # not on crates.io; pinned, and web/vendor/zenoh_web.js is bundled from these same revs (run/vendor_zenoh_web)
-zenoh-web = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "d1d0f27a1a6f755def9259a9c541a09241eafae8" }
-zenoh-dimos-codecs = { git = "https://github.com/jeff-hykin/zenoh-dimos-codecs", rev = "236fdf5513302880a4a844a680cc475c91dcf96c" }
+zenoh-web = { git = "https://github.com/jeff-hykin/zenoh-web", rev = "1aa39731af8b4f6599ee3ef0d00e81106d9cd502" }
+zenoh-dimos-codecs = { git = "https://github.com/jeff-hykin/zenoh-dimos-codecs", rev = "8f59c8914c7e5600e2173615ce2b64e16f11b138" }
 zune-core = "0.5.3"
 zune-jpegxl = "0.5.2"
 

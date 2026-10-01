@@ -647,15 +647,6 @@ const LATENCY_HIGH_MS = 300
 /// A frame older than this is not worth sending: the bridge drops it instead.
 const FRAME_MAX_AGE_MS = 500
 
-/// How camera pictures reach the page: "video" (zenoh-web's H.264 track, shown in a <video>)
-/// or "jpeg" (one JPEG file per picture on the data channel, drawn on a canvas). `?imageTransport=`
-/// in the page's URL overrides the default. On R1 (a Jetson Orin, Chrome over Wi-Fi + VPN, zenoh-web
-/// 799d8f4) H.264 measured 29 fps at 57-58 ms (p95 ~90) against JPEG files' ~25 fps at ~97 ms (p95
-/// ~290) for 4x the bytes, so video is the default.
-const DEFAULT_IMAGE_TRANSPORT = "video"
-const IMAGE_TRANSPORT = ["video", "jpeg"].includes(new URLSearchParams(location.search).get("imageTransport"))
-    ? new URLSearchParams(location.search).get("imageTransport")
-    : DEFAULT_IMAGE_TRANSPORT
 /// A frozen last frame reads exactly like a live one, so a feed that stopped is
 /// blanked rather than left showing whatever it was pointing at minutes ago. The
 /// window scales with the topic's own rate so a genuinely slow publisher does not
@@ -696,8 +687,6 @@ function renderTileStats() {
         if (frame?.video) {
             const video = frame.video
             detail = ` · ${video.width}x${video.height} q${Math.round(video.quality * 100)} · ${(video.encodedBytes / 1024).toFixed(0)} KB`
-        } else if (tile.imageSize) {
-            detail = ` · ${tile.imageSize} jpeg · ${(tile.imageBytes / 1024).toFixed(0)} KB`
         } else if (frame?.decoded) {
             const depth = frame.decoded
             detail = ` · ${depth.width}x${depth.height} depth${depth.stride > 1 ? ` 1/${depth.stride}` : ""}`
@@ -944,7 +933,7 @@ function openTile(key) {
     const isDepth = codec.endsWith("-depth")
     const root = document.createElement("div")
     root.className = "tile"
-    const media = isDepth || IMAGE_TRANSPORT === "jpeg"
+    const media = isDepth
         ? document.createElement("canvas")
         : Object.assign(document.createElement("video"), { muted: true, autoplay: true, playsInline: true })
     const bar = document.createElement("div")
@@ -1004,9 +993,6 @@ function subscribeOptions(codec) {
     if (settings.max_hz > 0) {
         options.maxHz = settings.max_hz
     }
-    if (!codec.endsWith("-depth")) {
-        options.imageTransport = IMAGE_TRANSPORT
-    }
     return options
 }
 
@@ -1062,19 +1048,6 @@ function onTileMessage(tile, message) {
     }
     if (message.decoded) {
         drawDepth(tile, message.decoded)
-        tile.painted += 1
-        tile.paintedAt = performance.now()
-    }
-    if (message.image) {
-        const canvas = tile.media
-        if (canvas.width !== message.image.width || canvas.height !== message.image.height) {
-            canvas.width = message.image.width
-            canvas.height = message.image.height
-        }
-        canvas.getContext("2d").drawImage(message.image, 0, 0)
-        tile.imageSize = `${message.image.width}x${message.image.height}`
-        tile.imageBytes = message.bytes.length
-        message.image.close()
         tile.painted += 1
         tile.paintedAt = performance.now()
     }
