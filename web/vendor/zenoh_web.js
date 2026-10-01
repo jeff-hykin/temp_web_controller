@@ -1,4 +1,4 @@
-// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@ca8ee57f876654b8c43413a1cda8f8c1e32c6cd6 by run/vendor_zenoh_web. Do not edit.
+// zenoh-web browser client, bundled from github.com/jeff-hykin/zenoh-web@7aa1680dec6ce8dd47300cc98ec6ea30a4400281 by run/vendor_zenoh_web. Do not edit.
 // zenoh-web/client/vendor/fzstd.ts
 var ab = ArrayBuffer;
 var u8 = Uint8Array;

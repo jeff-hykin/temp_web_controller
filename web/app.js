@@ -647,10 +647,13 @@ const LATENCY_HIGH_MS = 300
 /// A frame older than this is not worth sending: the bridge drops it instead.
 const FRAME_MAX_AGE_MS = 500
 
-/// Camera pictures arrive as JPEG files on the data channel, decoded with createImageBitmap
-/// and drawn on a canvas. Measured on R1 (a Jetson Orin, Chrome over Wi-Fi) against zenoh-web's
-/// H.264 track, which spends tens of ms in the browser's jitter buffer and video pipeline.
-const IMAGE_TRANSPORT = "jpeg"
+/// How camera pictures reach the page: "video" (zenoh-web's H.264 track, shown in a <video>)
+/// or "jpeg" (one JPEG file per picture on the data channel, drawn on a canvas). `?imageTransport=`
+/// in the page's URL overrides the default.
+const DEFAULT_IMAGE_TRANSPORT = "jpeg"
+const IMAGE_TRANSPORT = ["video", "jpeg"].includes(new URLSearchParams(location.search).get("imageTransport"))
+    ? new URLSearchParams(location.search).get("imageTransport")
+    : DEFAULT_IMAGE_TRANSPORT
 /// A frozen last frame reads exactly like a live one, so a feed that stopped is
 /// blanked rather than left showing whatever it was pointing at minutes ago. The
 /// window scales with the topic's own rate so a genuinely slow publisher does not

@@ -460,7 +460,8 @@ try {
         const celestial = tab.page.unsafelyGetCelestialBindings()
         await celestial.Page.enable()
         await celestial.Page.addScriptToEvaluateOnNewDocument({ source: HOOKS })
-        await tab.page.goto(`${args.url}/`, { waitUntil: "load" })
+        // a url with a query (e.g. ".../?imageTransport=video") is used as given
+        await tab.page.goto(args.url.includes("?") ? args.url : `${args.url}/`, { waitUntil: "load" })
         tab.selected = await selectCameras(tab.page, tab.cameras)
         console.log(`tab ${tabs.indexOf(tab) + 1}: on = ${JSON.stringify(tab.selected)}`)
     }

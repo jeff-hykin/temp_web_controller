@@ -3,9 +3,9 @@
 A single self-contained binary that serves a phone/desktop drive controller for dimos robots.
 It listens on both LCM and zenoh and discovers every topic on the wire. Cameras and steering go
 through [zenoh-web](https://github.com/jeff-hykin/zenoh-web): images arrive in the browser as
-JPEG files on a WebRTC data channel (zenoh-web's `imageTransport: "jpeg"`; on a Jetson this showed
-frames sooner than its H.264 track, which `IMAGE_TRANSPORT` in `web/app.js` still selects), drawn
-on a canvas like the lossless depth, and the page publishes
+JPEG files on a WebRTC data channel drawn on a canvas, or as zenoh-web's H.264 video track
+(`DEFAULT_IMAGE_TRANSPORT` in `web/app.js`; `?imageTransport=video` or `?imageTransport=jpeg` on the
+page's URL overrides it); depth stays lossless on a canvas, and the page publishes
 `/tele_cmd_vel` on zenoh itself, which web_ctrl mirrors onto LCM.
 
 Image delivery is real-time first: zenoh-web drops frames and lowers quality per browser, from

@@ -41,7 +41,7 @@
                             lockFile = ./Cargo.lock;
                             # zenoh-web is a git dependency (its forked webrtc crates come from the
                             # same checkout, so one hash covers them). Update with the rev in Cargo.toml.
-                            outputHashes."zenoh-web-0.2.0" = "sha256-amW3d23eSCaAQTrHVV0TLdhhexKNpYuU3yxaMmYkPcM=";
+                            outputHashes."zenoh-web-0.2.0" = "sha256-N1LyeUGqUKcAezroLl5EYcXtyfUYvM+lA96wPOBW0/U=";
                         };
                     };
 
